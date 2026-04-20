@@ -1,0 +1,45 @@
+# Environment files
+.env
+.env.*
+
+# Public/example project artifacts (don't commit large example repos)
+/public/
+/src/public/
+
+# Storage and vector DB artifacts
+/storage/
+/data/vector_store/
+/data/chunks/
+
+# ADK session/artifact folders (ephemeral) - ignore unless you explicitly want to track them
+.adk/
+
+# Python caches and virtualenvs
+__pycache__/
+*.py[cod]
+env/
+venv/
+venv*/
+# Environment files
+.env
+.env.*
+
+# Public/example project artifacts (don't commit large example repos)
+/public/
+/src/public/
+
+# Storage and vector DB artifacts
+/storage/
+/data/vector_store/
+/data/chunks/
+/data/chroma_db/
+
+# Python caches and virtualenvs
+__pycache__/
+*.py[cod]
+env/
+venv/
+venv*/
+
+.idx/
+rag-implement

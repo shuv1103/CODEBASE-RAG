@@ -1,0 +1,11 @@
+google-generativeai
+langchain-google-genai
+chromadb
+python-dotenv
+pydantic
+astchunk
+ragas
+datasets
+pandas
+google-adk
+streamlit 

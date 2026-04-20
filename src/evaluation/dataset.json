@@ -1,0 +1,12 @@
+[
+  {
+    "question": "Where is the patient add form implemented in the frontend?",
+    "answer": "The patient add form UI is implemented in the React component `AddPatientComponent.jsx` under `frontend/src/PatientComponents/`. It contains the JSX form and submits via `PatientService` to the backend API.",
+    "contexts": [
+      "frontend/src/PatientComponents/AddPatientComponent.jsx: React component with form fields and handleSubmit that calls PatientService.createPatient(...)",
+      "frontend/src/services/PatientService.js: exports createPatient(data) which calls ApiService.post('/api/patients', data)",
+      "frontend/src/App.js: includes routing to the route that renders AddPatientComponent"
+    ],
+    "ground_truth": "AddPatientComponent.jsx (frontend/src/PatientComponents/) implements the add-patient form and uses PatientService to send data to the backend."
+  }
+]
