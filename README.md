@@ -118,6 +118,29 @@ Grounded answers with file/context evidence
 
 **Core files**: `src/chunking/chunker.py`, `src/chunking/chunk_models.py`, `src/chunking/chunk_persist.py`, `src/utils/chunk_config.py`
 
+## How AST Chunking Happens ?
+
+### Chunk size -
+Instead of cutting code randomly, we go down the AST from module → class → function and stop when the piece fits the size limit. Ideally, each chunk becomes something like a full function (for example, `[D] calculate_total` with `[E, F, G]` inside it). If the size is too small, it breaks into tiny parts like `[E]`, `[F]`, `[G]`, which lose meaning.
+
+### Chunk overlap -
+After splitting, we look at dependencies—like `[I]` calling `[D]`. So when we create a chunk for `[I]`, we also include `[D]` (or its signature) as overlap. This way, every chunk still “understands” the code it depends on instead of being isolated.
+
+### Chunking Result - 
+Chunk size ensures each chunk is a complete logical unit (like a function), and overlap ensures no important connections are lost between chunks. So when your RAG system retrieves something, it gets code that is both meaningful on its own and connected to the bigger picture.
+
+### Chunk Nodes
+- `[A]` - Module
+- `[B]` - Class Definition (`OrderService`)
+- `[C]` - Function Definition (`process_order`)
+- `[D]` - Function Definition (`calculate_total`)
+- `[E]` - Assignment Operation (`total = price * qty`)
+- `[F]` - Control Statement, IF (`total > 100`)
+- `[G]` - Return
+- `[H]` - Assignment Operation (`service = OrderService()`)
+- `[I]` - Function Calling (`service.calculate_total`)
+
+
 ---
 
 ### 3) Embedding + vectorization layer
