@@ -316,7 +316,9 @@ Runs the RAGAS evaluation suite against `dataset.json` and prints metric scores.
 
 ### 2 — AST Chunking
 
-Naive token-window splitting destroys code semantics — a function split at line 50 loses its return statement and calling context. This layer uses `astchunk` to cut along syntax tree boundaries.
+<img width="869" height="745" alt="image" src="https://github.com/user-attachments/assets/bda84470-e5f9-4a94-8a57-70a44f31bb51" />
+
+Naive token-window splitting destroys code semantics — a function split at a random line loses its actual context. This layer uses `astchunk` to cut along syntax tree boundaries.
 
 #### How it works
 
@@ -341,6 +343,9 @@ Naive token-window splitting destroys code semantics — a function split at lin
 **Result:** retrieval returns chunks that are both self-contained (chunk size) and contextually connected (overlap) — meaningfully better than fixed-window splitting for code Q&A.
 
 **Core files:** `src/chunking/chunker.py`, `src/chunking/chunk_models.py`, `src/chunking/chunk_persist.py`, `src/utils/chunk_config.py`
+
+
+
 
 ---
 
