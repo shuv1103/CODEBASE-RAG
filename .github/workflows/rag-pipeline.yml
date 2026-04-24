@@ -1,0 +1,219 @@
+name: RAG Pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Dockerfile'
+      - 'req.txt'
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: 'Git URL of the repository to index (blank = index this repo)'
+        required: false
+        default: ''
+      skip_indexing:
+        description: 'Skip chunk + embed steps (build image only)'
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Job 1: Build Docker image and push to GHCR
+  # ─────────────────────────────────────────────
+  build:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image-ref.outputs.image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Set image output
+        id: image-ref
+        run: echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+  # ─────────────────────────────────────────────
+  # Job 2: AST-chunk the target repository
+  # ─────────────────────────────────────────────
+  chunk:
+    name: Chunk Repository
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ inputs.skip_indexing != true }}
+    permissions:
+      packages: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clone target repository
+        if: ${{ inputs.repo_url != '' }}
+        run: git clone --depth 1 "${{ inputs.repo_url }}" /tmp/target-repo
+
+      # Mount the external repo if provided, otherwise index this repo
+      - name: Set repo mount path
+        id: repo
+        run: |
+          if [ -n "${{ inputs.repo_url }}" ]; then
+            echo "path=/tmp/target-repo" >> $GITHUB_OUTPUT
+          else
+            echo "path=${{ github.workspace }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run chunking pipeline
+        run: |
+          mkdir -p ${{ github.workspace }}/src/data/chunks
+          docker run --rm \
+            -v "${{ github.workspace }}/src/data:/app/src/data" \
+            -v "${{ steps.repo.outputs.path }}:/repo:ro" \
+            -e REPO_PATH=/repo \
+            -e VECTOR_STORE_PATH=/app/src/data/chunks \
+            -e CHUNKS_JSON_PATH=/app/src/data/chunks/code_chunks.jsonl \
+            ${{ needs.build.outputs.image }} \
+            python -m chunking.chunk_main
+
+      - name: Upload chunks artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-chunks-${{ github.run_id }}
+          path: src/data/chunks/code_chunks.jsonl
+          if-no-files-found: error
+          retention-days: 7
+
+  # ─────────────────────────────────────────────
+  # Job 3: Embed chunks into ChromaDB
+  # ─────────────────────────────────────────────
+  embed:
+    name: Embed & Store Vectors
+    needs: [build, chunk]
+    runs-on: ubuntu-latest
+    if: ${{ inputs.skip_indexing != true }}
+    permissions:
+      packages: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download chunks artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: code-chunks-${{ github.run_id }}
+          path: src/data/chunks/
+
+      - name: Run embedding pipeline
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/src/data:/app/src/data" \
+            -e GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }} \
+            -e EMBEDDING_MODEL=gemini-embedding-001 \
+            -e EMBEDDING_BATCH_SIZE=20 \
+            -e EMBEDDING_OUTPUT_DIMENSION=3072 \
+            -e VECTOR_STORE_PATH=/app/src/data/chunks \
+            -e CHUNKS_JSON_PATH=/app/src/data/chunks/code_chunks.jsonl \
+            -e LANGCHAIN_TRACING_V2=false \
+            ${{ needs.build.outputs.image }} \
+            python -m embeddings.embeddings_main
+
+      - name: Upload vector store artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-store-${{ github.run_id }}
+          path: src/data/chunks/
+          retention-days: 30
+
+  # ─────────────────────────────────────────────
+  # Job 4: Run RAGAS evaluation
+  # ─────────────────────────────────────────────
+  evaluate:
+    name: Evaluate RAG Quality
+    needs: [build, embed]
+    runs-on: ubuntu-latest
+    if: ${{ inputs.skip_indexing != true }}
+    permissions:
+      packages: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download vector store
+        uses: actions/download-artifact@v4
+        with:
+          name: vector-store-${{ github.run_id }}
+          path: src/data/chunks/
+
+      - name: Run RAGAS evaluation
+        run: |
+          mkdir -p ${{ github.workspace }}/src/evaluation
+          docker run --rm \
+            -v "${{ github.workspace }}/src:/app/src" \
+            -e GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }} \
+            -e EVALUATION_LLM_MODEL=gemini-2.5-flash \
+            -e VECTOR_STORE_PATH=/app/src/data/chunks \
+            -e EVALUATION_DATASET_PATH=/app/src/evaluation/dataset.json \
+            -e LANGCHAIN_TRACING_V2=false \
+            ${{ needs.build.outputs.image }} \
+            python -m evaluation.run_eval | tee src/evaluation/results.txt
+
+      - name: Upload evaluation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.run_id }}
+          path: src/evaluation/results.txt
+          retention-days: 14

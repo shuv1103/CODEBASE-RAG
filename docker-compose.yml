@@ -11,6 +11,7 @@ services:
       REPO_PATH: /repo
       VECTOR_STORE_PATH: /app/src/data/chunks
       CHUNKS_JSON_PATH: /app/src/data/chunks/code_chunks.jsonl
+    command: python -m chunking.chunk_main
 
   # Step 2: Embed chunks and store in ChromaDB
   embed:

@@ -1,0 +1,156 @@
+name: Deploy Agent
+
+on:
+  # Auto-trigger after a successful RAG pipeline run on main
+  workflow_run:
+    workflows: [RAG Pipeline]
+    branches: [main]
+    types: [completed]
+  # Also allow manual deploys
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Pipeline run ID whose vector-store artifact to deploy'
+        required: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Gate: only proceed if the triggering pipeline succeeded
+  # ─────────────────────────────────────────────
+  check:
+    name: Check Pipeline Status
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    outputs:
+      source_run_id: ${{ steps.resolve.outputs.run_id }}
+    steps:
+      - name: Resolve source run ID
+        id: resolve
+        run: |
+          if [ -n "${{ inputs.run_id }}" ]; then
+            echo "run_id=${{ inputs.run_id }}" >> $GITHUB_OUTPUT
+          else
+            echo "run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
+          fi
+
+  # ─────────────────────────────────────────────
+  # Build a deployable image with the vector store baked in
+  # ─────────────────────────────────────────────
+  release-image:
+    name: Build Release Image
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Download the vector store artifact produced by the pipeline run
+      - name: Download vector store artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vector-store-${{ needs.check.outputs.source_run_id }}
+          path: src/data/chunks/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ needs.check.outputs.source_run_id }}
+
+      # Write a minimal Dockerfile that layers the vector store on top of the base image
+      - name: Write release Dockerfile
+        run: |
+          printf 'FROM %s/%s:latest\nCOPY src/data/chunks/ /app/src/data/chunks/\n' \
+            "${{ env.REGISTRY }}" "${{ env.IMAGE_NAME }}" > Dockerfile.release
+          cat Dockerfile.release
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.release
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:release
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:release-${{ github.run_id }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────────
+  # Deploy: pull the release image and start the agent
+  #
+  # This job shows SSH deployment to a self-hosted server.
+  # Swap this out for your target platform:
+  #   - Cloud Run:  gcloud run deploy ...
+  #   - ECS:        aws ecs update-service ...
+  #   - Kubernetes: kubectl set image ...
+  # ─────────────────────────────────────────────
+  deploy:
+    name: Deploy Agent Server
+    needs: release-image
+    runs-on: ubuntu-latest
+    environment: production
+    # Uncomment and configure secrets for your deployment target
+    # env:
+    #   DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+    #   DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+
+    steps:
+      - name: Log deployment info
+        run: |
+          echo "Release image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:release"
+          echo "Deploy this image with:"
+          echo ""
+          echo "  # Self-hosted server (SSH)"
+          echo "  docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:release"
+          echo "  docker stop codebase-rag-agent || true"
+          echo "  docker run -d --name codebase-rag-agent \\"
+          echo "    -p 8000:8000 \\"
+          echo "    -e GOOGLE_API_KEY=\$GOOGLE_API_KEY \\"
+          echo "    -e AGENT_MODEL=gemini-2.5-flash \\"
+          echo "    -e VECTOR_STORE_PATH=/app/src/data/chunks \\"
+          echo "    ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:release"
+          echo ""
+          echo "  # Google Cloud Run"
+          echo "  gcloud run deploy codebase-rag-agent \\"
+          echo "    --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:release \\"
+          echo "    --port 8000 --region us-central1"
+
+      # ── SSH deployment example ──────────────────────────────────────────────
+      # Uncomment this block and add DEPLOY_HOST / DEPLOY_USER / DEPLOY_KEY secrets.
+      #
+      # - name: Deploy via SSH
+      #   uses: appleboy/ssh-action@v1
+      #   with:
+      #     host: ${{ secrets.DEPLOY_HOST }}
+      #     username: ${{ secrets.DEPLOY_USER }}
+      #     key: ${{ secrets.DEPLOY_KEY }}
+      #     script: |
+      #       echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      #       docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:release
+      #       docker stop codebase-rag-agent || true
+      #       docker rm codebase-rag-agent || true
+      #       docker run -d --name codebase-rag-agent \
+      #         --restart unless-stopped \
+      #         -p 8000:8000 \
+      #         -e GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }} \
+      #         -e AGENT_MODEL=gemini-2.5-flash \
+      #         -e VECTOR_STORE_PATH=/app/src/data/chunks \
+      #         ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:release
