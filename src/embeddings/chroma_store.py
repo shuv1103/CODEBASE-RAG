@@ -9,8 +9,8 @@ load_dotenv()
 
 class ChromaVectorStore:
     def __init__(self):
-        persist_dir = "/home/user/CODEBASE-RAG-AGENT/src /data"
-        collection_name = "code_chunks"
+        persist_dir = os.getenv("VECTOR_STORE_PATH", "/app/src/data/chunks")
+        collection_name = os.getenv("VECTOR_STORE_COLLECTION_NAME", "code_chunks")
 
         os.makedirs(persist_dir, exist_ok=True)
 

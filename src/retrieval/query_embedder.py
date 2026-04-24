@@ -1,5 +1,8 @@
-from embeddings.embedding_client import EmbeddingService
+from embeddings.embeddings_client import EmbeddingService
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
 class QueryEmbedder:
     """
@@ -8,7 +11,7 @@ class QueryEmbedder:
     """
 
     def __init__(self) -> None:
-        self._embedding_service = EmbeddingService()
+        self._embedding_service = EmbeddingService(api_key=os.getenv("GOOGLE_API_KEY"), model_name=os.getenv("EMBEDDING_MODEL"))
 
     def embed_query(self, query: str) -> list[float]:
         """

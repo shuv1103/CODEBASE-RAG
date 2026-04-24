@@ -1,6 +1,6 @@
 from typing import Optional
 
-from retrieval.retriever_service import RetrievalService
+from retrieval.retrieval_service import RetrievalService
 
 
 class CodebaseRetrievalTool:
@@ -14,25 +14,29 @@ class CodebaseRetrievalTool:
     def __init__(self) -> None:
         self._retrieval_service = RetrievalService()
 
-    def retrieve_code_context(self, query: str, top_k: Optional[int] = None) -> str:
+    def retrieve_code_context(self, query: str) -> str:
         """
         Retrieve relevant code context for a user query.
 
         Args:
             query: Natural language question about the codebase.
-            top_k: Optional number of chunks to retrieve.
 
         Returns:
             Formatted code context string.
         """
+        
+        top_k = 5
         if not query or not query.strip():
             return "Query is empty. No retrieval performed."
 
-        return self._retrieval_service.retrieve_as_context(
+        return str(self._retrieval_service.retrieve_as_context(
             query=query.strip(),
             top_k=top_k,
-        )
+        ))
 
 
 # Single Tool Instance
 codebase_retrieval_tool = CodebaseRetrievalTool()
+
+if __name__ == "__main__":
+    print(codebase_retrieval_tool.retrieve_code_context("What is the purpose of the codebase?"))

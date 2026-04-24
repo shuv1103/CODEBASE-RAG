@@ -1,15 +1,16 @@
 {
   "stats": {
-    "total_documents_received": 78,
-    "total_ast_eligible_documents": 48,
+    "total_documents_received": 84,
+    "total_ast_eligible_documents": 84,
     "total_documents_chunked": 48,
     "total_chunks_created": 60,
-    "skipped_unsupported_language": 30,
-    "failed_files": 0,
+    "skipped_unsupported_language": 0,
+    "failed_files": 36,
     "language_distribution": {
-      "javascript": 10,
-      "javascript_react": 20,
-      "java": 48
+      "java": 48,
+      "html": 1,
+      "css": 5,
+      "javascript": 30
     }
   },
   "total_chunks": 60

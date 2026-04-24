@@ -1,0 +1,36 @@
+services:
+  # Step 1: AST-chunk the target repository
+  # Set HOST_REPO_PATH in .env to the local path of the repo you want to index
+  chunk:
+    build: .
+    volumes:
+      - ./src/data:/app/src/data
+      - ${HOST_REPO_PATH}:/repo:ro
+    env_file: .env
+    environment:
+      REPO_PATH: /repo
+      VECTOR_STORE_PATH: /app/src/data/chunks
+      CHUNKS_JSON_PATH: /app/src/data/chunks/code_chunks.jsonl
+
+  # Step 2: Embed chunks and store in ChromaDB
+  embed:
+    build: .
+    volumes:
+      - ./src/data:/app/src/data
+    env_file: .env
+    environment:
+      VECTOR_STORE_PATH: /app/src/data/chunks
+      CHUNKS_JSON_PATH: /app/src/data/chunks/code_chunks.jsonl
+    command: python -m embeddings.embeddings_main
+
+  # Step 3: Run the ADK agent web server
+  agent:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src/data:/app/src/data
+    env_file: .env
+    environment:
+      VECTOR_STORE_PATH: /app/src/data/chunks
+    restart: unless-stopped

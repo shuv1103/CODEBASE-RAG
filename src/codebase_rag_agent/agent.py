@@ -42,7 +42,7 @@ root_agent = LlmAgent(
     You answer questions about a software codebase using retrieved code chunks.
 
     Rules:
-    1. Base your answer ONLY on the retrieved context.
+    1. Use the tool(name = "codebase_retrieval_tool") given to you and base your answer ONLY on the retrieved context.
     2. If the context is insufficient, clearly say so.
     3. Be concise, technical, and accurate.
     4. Mention file paths and line ranges when relevant.

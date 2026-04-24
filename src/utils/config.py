@@ -15,6 +15,8 @@ SUPPORTED_EXTENSIONS = {
     ".h",
     ".hpp",
     ".cs",
+    ".html",
+    ".css",
 }
 
 # Directories to skip during traversal

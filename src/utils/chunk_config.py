@@ -1,10 +1,14 @@
-AST_SUPPORTED_LANGUAGES = {"python", "java", "csharp", "typescript"}
+AST_SUPPORTED_LANGUAGES = {"python", "java", "csharp", "typescript", "javascript", "html", "css"}
 
+# Keys must match what language_detector.py returns
 AST_LANGUAGE_ALIASES = {
     "python": "python",
     "java": "java",
     "csharp": "csharp",
     "typescript": "typescript",
+    "javascript": "javascript",
+    "html": "html",
+    "css": "css",
 }
 
 DEFAULT_AST_MAX_CHUNK_SIZE = 2300 # Recommended max chunk size for AST-based chunking to balance context window limits and retrieval relevance(2000-2500 tokens)

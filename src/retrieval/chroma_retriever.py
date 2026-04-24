@@ -1,7 +1,7 @@
 import os
 import chromadb
 
-from .retriever_schema import RetrievalResponse, RetrievedChunk
+from .retrieval_models import RetrievalResponse, RetrievedChunk
 
 
 class ChromaRetriever:

@@ -4,6 +4,7 @@ from collections import Counter
 from json import JSONDecodeError
 
 from dotenv import load_dotenv
+import time
 
 from .chroma_store import ChromaVectorStore
 from .embeddings_client import EmbeddingService
@@ -43,7 +44,7 @@ def main():
     model_name = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
     batch_size = int(os.getenv("EMBEDDING_BATCH_SIZE", "20"))
     chunks_json_path = os.getenv("CHUNKS_JSON_PATH")
-    output_dimensionality = os.getenv("EMBEDDING_OUTPUT_DIMENSIONALITY")
+    output_dimensionality = os.getenv("EMBEDDING_OUTPUT_DIMENSION")
 
     if not api_key:
         raise ValueError("GOOGLE_API_KEY missing in .env")
@@ -65,7 +66,7 @@ def main():
         print("No chunks found to embed.")
         return
 
-    embedder = EmbeddingService()
+    embedder = EmbeddingService(api_key, model_name)
 
     vector_store = ChromaVectorStore()
 
@@ -77,10 +78,11 @@ def main():
 
     for batch_number, batch in enumerate(batchify(chunks, batch_size), start=1):
         total_batches += 1
+        time.sleep(60)
         texts = [build_embedding_input_text(chunk) for chunk in batch]
-
+        
         try:
-            vectors = embedder.embed_texts(texts)
+            vectors = embedder.embed_documents(texts)
         except Exception as e:
             print(f"Batch {batch_number} failed: {e}")
             total_failed += len(batch)

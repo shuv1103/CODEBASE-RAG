@@ -14,9 +14,9 @@ class EmbeddingService:
     - query embeddings for semantic retrieval
     """
 
-    def __init__(self) -> None:
-        self._api_key = os.getenv("GOOGLE_API_KEY")
-        self._model_name = os.getenv("EMBEDDING_MODEL", "models/text-embedding-004")
+    def __init__(self,api_key, model_name) -> None:
+        self._api_key = api_key
+        self._model_name = model_name
 
         if not self._api_key:
             raise ValueError("GOOGLE_API_KEY is missing in .env")

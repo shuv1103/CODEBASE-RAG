@@ -58,8 +58,8 @@ class RepoLoader:
         self.repo_root = Path(config.repo_path).resolve()
         self.stats = IngestionStats()
 
-    def _should_skip_dir(self, directory: Path) -> bool:
-        return directory.name in SKIP_DIRECTORIES
+    def _is_in_skipped_directory(self, path: Path) -> bool:
+        return any(part in SKIP_DIRECTORIES for part in path.relative_to(self.repo_root).parts)
 
     def _scan_repository(self) -> List[Path]:
         """Recursively discover supported files, skipping configured directories."""
@@ -67,8 +67,9 @@ class RepoLoader:
 
         for path in self.repo_root.rglob("*"):
             if path.is_dir():
-                if self._should_skip_dir(path):
-                    continue
+                continue
+
+            if self._is_in_skipped_directory(path):
                 continue
 
             self.stats.total_files_scanned += 1
@@ -120,7 +121,7 @@ class RepoLoader:
 # Main entry point
 if __name__ == "__main__":
 
-    repo_path = r"/home/user/CODEBASE-RAG-AGENT/public/Hospital-Management-System-React-and-SpringBoot-master/Hospital-Management-System-React-and-SpringBoot-master"
+    repo_path = r"D:\CODEBASE-RAG-PROJECT\CODEBASE-RAG\public\Hospital-Management-System-React-and-SpringBoot-master"
     loader = RepoLoader(repo_path)
     result = loader.load()
 

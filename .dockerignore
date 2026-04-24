@@ -1,0 +1,12 @@
+.git/
+public/
+rag-implement/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+src/data/
+.adk/
+*.egg-info/
+.pytest_cache/
+.env

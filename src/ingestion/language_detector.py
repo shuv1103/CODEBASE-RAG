@@ -4,8 +4,8 @@ EXTENSION_LANGUAGE_MAP = {
     ".py": "python",
     ".js": "javascript",
     ".ts": "typescript",
-    ".jsx": "javascript_react",
-    ".tsx": "typescript_react",
+    ".jsx": "javascript",
+    ".tsx": "typescript",
     ".java": "java",
     ".go": "go",
     ".rs": "rust",
@@ -14,6 +14,8 @@ EXTENSION_LANGUAGE_MAP = {
     ".hpp": "cpp",
     ".h": "c",
     ".cs": "csharp",
+    ".html": "html",
+    ".css": "css",
 }
 
 

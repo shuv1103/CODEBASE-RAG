@@ -1,9 +1,9 @@
 import os
 from dotenv import load_dotenv
-
+from pathlib import Path
 from .chroma_retriever import ChromaRetriever
 from .query_embedder import QueryEmbedder
-from .retriever_schema import RetrievalResponse
+from .retrieval_models import RetrievalResponse
 
 load_dotenv()
 
@@ -20,8 +20,8 @@ class RetrievalService:
     """
 
     def __init__(self) -> None:
-        vector_store_path = "C:\\Users\\SHUVRADIPS\\Documents\\RAG-Codebase-ADK\\data\\vector_store"
-        collection_name = "code_chunks"
+        vector_store_path = Path(os.getenv("VECTOR_STORE_PATH"))
+        collection_name = os.getenv("VECTOR_STORE_COLLECTION_NAME")
 
         if not vector_store_path:
             raise ValueError("VECTOR_STORE_PATH is missing in .env")

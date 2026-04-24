@@ -1,10 +1,14 @@
+import os
+
 from ingestion.repo_loader import RepoLoader
 from .chunker import ASTCodeChunker
 from .chunk_persist import save_chunk_json_summary, save_chunks_jsonl_format
 
 
 def main():
-    repo_path = r"/home/user/CODEBASE-RAG-AGENT/public/Hospital-Management-System-React-and-SpringBoot-master/Hospital-Management-System-React-and-SpringBoot-master"
+    repo_path = os.getenv("REPO_PATH")
+    if not repo_path:
+        raise ValueError("REPO_PATH environment variable is required")
 
     # Step 1 - Ingest repository
     loader = RepoLoader(repo_path)
