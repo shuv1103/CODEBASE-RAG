@@ -95,8 +95,8 @@ Ask *"Where is JWT authentication implemented?"* and get back the exact files, c
 
 > Tested against a **Hospital Management System** codebase (React + Spring Boot) using the **Google ADK UI **.
 
-![Codebase RAG Agent — Google ADK UI Demo](<img width="1900" height="754" alt="image" src="https://github.com/user-attachments/assets/0da3e72b-5133-4c27-b152-4ac88037aa97" />
-)
+<img width="1900" height="754" alt="image" src="https://github.com/user-attachments/assets/0da3e72b-5133-4c27-b152-4ac88037aa97" />
+
 
 **What this screenshot demonstrates:**
 
