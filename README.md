@@ -40,54 +40,11 @@ Ask *"Where is JWT authentication implemented?"* and get back the exact files, c
 
 ---
 
-## System Architecture
+## System Architecture Diagram
 
-```text
- ┌─────────────────────────────────────────────────────┐
- │                   Repository Files                   │
- └──────────────────────────┬──────────────────────────┘
-                            │
-                            ▼
-              ┌─────────────────────────┐
-              │     Ingestion Layer      │
-              │  RepoLoader             │
-              │  FileDocument[] + stats │
-              └────────────┬────────────┘
-                            │
-                            ▼
-              ┌─────────────────────────┐
-              │     Chunking Layer       │
-              │  ASTCodeChunker          │
-              │  CodeChunk[] + stats    │
-              └────────────┬────────────┘
-                            │
-                            ▼
-              ┌─────────────────────────┐
-              │  Embedding + Vector DB   │
-              │  Google text-embedding   │
-              │  ChromaDB upsert        │
-              └────────────┬────────────┘
-                            │
-                            ▼
-              ┌─────────────────────────┐
-              │     Retrieval Layer      │
-              │  QueryEmbedder           │
-              │  ChromaRetriever         │
-              │  Typed retrieval results │
-              └────────────┬────────────┘
-                            │
-                            ▼
-              ┌─────────────────────────┐
-              │      Agent Layer         │
-              │  Google ADK LlmAgent     │
-              │  retrieve_code_context   │
-              └────────────┬────────────┘
-                            │
-                            ▼
-        ┌───────────────────────────────────────┐
-        │  Grounded answers with file evidence   │
-        └───────────────────────────────────────┘
-```
+
+
+<img width="1343" height="881" alt="image" src="https://github.com/user-attachments/assets/1a08ab80-5c50-4034-bd04-5926bd8590fd" />
 
 ---
 
