@@ -34,8 +34,8 @@ Ask *"Where is JWT authentication implemented?"* and get back the exact files, c
 | Metadata-rich vectors | Language, file path, symbol name, line range stored alongside embeddings |
 | Persistent vector store | ChromaDB with batch upsert and incremental re-indexing |
 | Grounded ADK agent | Tool-first architecture: `retrieve_code_context` fires before any generation |
-| Full observability | ADK Events + Traces panel shows every tool call lifecycle |
-| RAGAS evaluation | Faithfulness, answer relevancy, context precision & recall out of the box |
+| Full observability | LangSmith integration shows every tool call, LLM usage, etc lifecycle |
+| RAGAS evaluation | Faithfulness, answer relevancy, context precision & recall |
 | Docker-native | Three-service Compose pipeline: chunk → embed → agent |
 
 ---
