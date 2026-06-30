@@ -360,14 +360,12 @@ Add ground-truth Q&A pairs to `src/evaluation/dataset.json` and run `python -m s
 
 ## Engineering Decisions
 
-**AST-first chunking over sliding windows** — Token windows split at arbitrary positions, destroying function bodies and class hierarchies. AST boundaries guarantee every chunk is a syntactically valid, semantically meaningful unit. Retrieval quality depends entirely on chunk quality.
+**1. AST-first chunking over sliding windows** — Token windows split at arbitrary positions, destroying function bodies and class hierarchies. AST boundaries guarantee every chunk is a syntactically valid, semantically meaningful unit. Retrieval quality depends entirely on chunk quality.
 
-**Pydantic models at every layer boundary** — Each layer (ingestion → chunking → embedding → retrieval) has its own typed models. Schema mismatches surface at object construction, not at generation time. Safer refactors, faster debugging.
+**2. Pydantic models at every layer boundary** — Each layer (ingestion → chunking → embedding → retrieval) has its own typed models. Schema mismatches surface at object construction, not at generation time. Safer refactors, faster debugging.
 
-**Metadata-enriched embeddings** — Embedding plain code content is table stakes. Including language, file path, and symbol name in the embedding text improves retrieval precision for cross-file and cross-language queries.
+**3. Metadata-enriched embeddings** — Embedding plain code content is table stakes. Including language, file path, and symbol name in the embedding text improves retrieval precision for cross-file and cross-language queries.
 
-**Tool-based ADK agent** — Wrapping retrieval as a mandatory tool forces the LLM into a retrieve-then-generate pattern. Without this constraint, instruction-following alone is insufficient to prevent hallucination on large codebases.
+**4. Tool-based ADK agent** — Wrapping retrieval as a mandatory tool forces the LLM into a retrieve-then-generate pattern. Without this constraint, instruction-following alone is insufficient to prevent hallucination on large codebases.
 
-**Evaluation from day one** — RAGAS metrics are set up before the pipeline is "done." This makes quality regressions from chunking parameter changes or embedding model swaps immediately visible.
-
-**Docker-native pipeline** — Each stage (chunk, embed, agent) is a standalone Compose service. The target repository is mounted read-only. The ChromaDB data volume is shared across services. No state leaks between runs.
+**5. Docker-native pipeline** — Each stage (chunk, embed, agent) is a standalone Compose service. The target repository is mounted read-only. The ChromaDB data volume is shared across services. No state leaks between runs.
