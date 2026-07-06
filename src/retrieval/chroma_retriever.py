@@ -9,8 +9,15 @@ class ChromaRetriever:
     Thin wrapper around ChromaDB collection querying.
     """
 
-    def __init__(self, persist_dir: str, collection_name: str) -> None:
-        self._client = chromadb.PersistentClient(path=persist_dir)
+    def __init__(self, persist_dir: str | None, collection_name: str) -> None:
+        chroma_host = os.getenv("CHROMA_HOST")
+        chroma_port = int(os.getenv("CHROMA_PORT", "8000"))
+
+        if chroma_host:
+            self._client = chromadb.HttpClient(host=chroma_host, port=chroma_port)
+        else:
+            self._client = chromadb.PersistentClient(path=persist_dir)
+
         self._collection = self._client.get_collection(name=collection_name)
 
     def search(

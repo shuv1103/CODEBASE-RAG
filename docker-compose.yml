@@ -1,4 +1,16 @@
 services:
+  # ChromaDB vector store - persistent HTTP server
+  chroma:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    restart: unless-stopped
+
   # Step 1: AST-chunk the target repository
   # Set HOST_REPO_PATH in .env to the local path of the repo you want to index
   chunk:
@@ -9,7 +21,6 @@ services:
     env_file: .env
     environment:
       REPO_PATH: /repo
-      VECTOR_STORE_PATH: /app/src/data/chunks
       CHUNKS_JSON_PATH: /app/src/data/chunks/code_chunks.jsonl
     command: python -m chunking.chunk_main
 
@@ -20,8 +31,11 @@ services:
       - ./src/data:/app/src/data
     env_file: .env
     environment:
-      VECTOR_STORE_PATH: /app/src/data/chunks
       CHUNKS_JSON_PATH: /app/src/data/chunks/code_chunks.jsonl
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+    depends_on:
+      - chroma
     command: python -m embeddings.embeddings_main
 
   # Step 3: Run the ADK agent web server
@@ -29,9 +43,13 @@ services:
     build: .
     ports:
       - "8000:8000"
-    volumes:
-      - ./src/data:/app/src/data
     env_file: .env
     environment:
-      VECTOR_STORE_PATH: /app/src/data/chunks
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+    depends_on:
+      - chroma
     restart: unless-stopped
+
+volumes:
+  chroma_data:

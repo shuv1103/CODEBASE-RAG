@@ -1,5 +1,7 @@
 google-generativeai
 langchain-google-genai
+langchain-openai
+openai
 chromadb
 python-dotenv
 pydantic
@@ -8,4 +10,5 @@ ragas
 datasets
 pandas
 google-adk
-streamlit 
+streamlit
+langsmith

@@ -5,19 +5,23 @@ from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
 
 from .tools import codebase_retrieval_tool
+from .tracing import (
+    before_agent_callback,
+    after_agent_callback,
+    before_model_callback,
+    after_model_callback,
+    before_tool_callback,
+    after_tool_callback,
+)
 
 load_dotenv()
 
 
 def _validate_env() -> None:
-    """
-    Validate required environment variables before agent startup.
-    """
     required_env_vars = [
         "GOOGLE_API_KEY",
         "AGENT_MODEL",
     ]
-
     missing = [var for var in required_env_vars if not os.getenv(var)]
     if missing:
         raise ValueError(
@@ -55,4 +59,10 @@ root_agent = LlmAgent(
 
     """,
     tools=[retrieve_code_context_tool],
+    before_agent_callback=before_agent_callback,
+    after_agent_callback=after_agent_callback,
+    before_model_callback=before_model_callback,
+    after_model_callback=after_model_callback,
+    before_tool_callback=before_tool_callback,
+    after_tool_callback=after_tool_callback,
 )

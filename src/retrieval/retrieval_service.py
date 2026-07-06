@@ -1,6 +1,5 @@
 import os
 from dotenv import load_dotenv
-from pathlib import Path
 from .chroma_retriever import ChromaRetriever
 from .query_embedder import QueryEmbedder
 from .retrieval_models import RetrievalResponse
@@ -20,13 +19,12 @@ class RetrievalService:
     """
 
     def __init__(self) -> None:
-        vector_store_path = Path(os.getenv("VECTOR_STORE_PATH"))
-        collection_name = os.getenv("VECTOR_STORE_COLLECTION_NAME")
+        chroma_host = os.getenv("CHROMA_HOST")
+        vector_store_path = os.getenv("VECTOR_STORE_PATH")
+        collection_name = os.getenv("VECTOR_STORE_COLLECTION_NAME", "code_chunks")
 
-        if not vector_store_path:
-            raise ValueError("VECTOR_STORE_PATH is missing in .env")
-        if not collection_name:
-            raise ValueError("VECTOR_STORE_COLLECTION_NAME is missing in .env")
+        if not chroma_host and not vector_store_path:
+            raise ValueError("Either CHROMA_HOST or VECTOR_STORE_PATH must be set in .env")
 
         self._query_embedder = QueryEmbedder()
         self._retriever = ChromaRetriever(

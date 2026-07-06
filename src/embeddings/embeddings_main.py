@@ -59,7 +59,7 @@ def main():
         output_dimensionality = None
 
 
-    # load the chunks from the JSONL file created by the chunking step
+    # load chunks from the JSONL file produced by the chunking step
     chunks = load_chunks(chunks_json_path)
 
     if not chunks:

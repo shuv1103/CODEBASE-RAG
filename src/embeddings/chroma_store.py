@@ -9,15 +9,20 @@ load_dotenv()
 
 class ChromaVectorStore:
     def __init__(self):
-        persist_dir = os.getenv("VECTOR_STORE_PATH", "/app/src/data/chunks")
         collection_name = os.getenv("VECTOR_STORE_COLLECTION_NAME", "code_chunks")
+        chroma_host = os.getenv("CHROMA_HOST")
+        chroma_port = int(os.getenv("CHROMA_PORT", "8000"))
 
-        os.makedirs(persist_dir, exist_ok=True)
+        if chroma_host:
+            self.client = chromadb.HttpClient(host=chroma_host, port=chroma_port)
+            print(f"Chroma HTTP server: {chroma_host}:{chroma_port}")
+        else:
+            persist_dir = os.getenv("VECTOR_STORE_PATH", "/app/src/data/chunks")
+            os.makedirs(persist_dir, exist_ok=True)
+            self.client = chromadb.PersistentClient(path=persist_dir)
+            print(f"Chroma DB path: {os.path.abspath(persist_dir)}")
 
-        self.client = chromadb.PersistentClient(path=persist_dir)
         self.collection = self.client.get_or_create_collection(name=collection_name)
-
-        print(f"Chroma DB path: {os.path.abspath(persist_dir)}")
         print(f"Chroma collection: {collection_name}")
 
     def upsert(self, embedded_chunks):
