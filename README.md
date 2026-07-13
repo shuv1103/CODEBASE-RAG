@@ -50,7 +50,7 @@ Ask *"Where is JWT authentication implemented?"* and get back the exact files, c
 
 ## DEMO(Screenshot)
 
-> Tested against a **Hospital Management System** codebase (React + Spring Boot) using the **Google ADK UI **.
+> Tested against a **Hospital Management System** sample codebase (React + Spring Boot) using the **Google ADK UI **.
 
 <img width="1900" height="754" alt="image" src="https://github.com/user-attachments/assets/0da3e72b-5133-4c27-b152-4ac88037aa97" />
 
@@ -158,7 +158,7 @@ python -m src.embeddings.embeddings_main
 adk web --host 0.0.0.0 --port 8000
 ```
 
-Open `http://localhost:8000` in your browser — the ADK UI is ready.
+Local Testing - Open `http://localhost:8000` in your browser — the ADK UI is ready.
 
 ---
 
@@ -177,7 +177,7 @@ docker compose run --rm embed
 docker compose up agent
 ```
 
-The agent is served at `http://localhost:8000`.
+Local Testing - The agent is served at `http://localhost:8000`.
 
 ---
 
@@ -201,11 +201,11 @@ EMBEDDING_BATCH_SIZE=20
 TOP_K=5
 
 # Agent
-AGENT_MODEL=gemini-2.0-flash
+AGENT_MODEL=your-llm(suggest - pick a smaller model)
 
 # Evaluation
 EVALUATION_DATASET_PATH=src/evaluation/dataset.json
-EVALUATION_LLM_MODEL=gemini-2.0-flash
+EVALUATION_LLM_MODEL=your-llm(suggest - pick a larger model)
 ```
 
 ---
@@ -309,7 +309,7 @@ Naive token-window splitting destroys code semantics — a function split at a r
 ### 3 — Embedding and Vectorization
 
 - Formats each chunk into an embedding-ready string combining code content and metadata (language, file path, symbol name).
-- Calls Google's `text-embedding-004` model in configurable batches.
+- Calls OpenAI `text-embedding-3-large` model in configurable batches.
 - Upserts vectors and full metadata payloads into a persistent ChromaDB collection.
 - Tracks batch-level operational counters for observability.
 
@@ -319,7 +319,7 @@ Naive token-window splitting destroys code semantics — a function split at a r
 
 ### 4 — Retrieval
 
-- Embeds the user's natural language query using the same Google embedding model.
+- Embeds the user's natural language query using the same OpenAI embedding model.
 - Executes cosine similarity search against the ChromaDB collection.
 - Normalizes raw Chroma results into typed `RetrievalResult` / `RetrievalResponse` objects.
 - Formats retrieved chunks into structured, LLM-ready context blocks with file path and line attribution.
