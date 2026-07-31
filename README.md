@@ -12,7 +12,7 @@
 ![RAGAS](https://img.shields.io/badge/Evaluation-RAGAS-22c55e?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)
 
-[Overview](#overview) · [Architecture](#system-architecture) · [Agent Demo](#agent-in-action) · [Quickstart](#quickstart) · [Pipeline](#pipeline-runbook) · [Deep Dive](#deep-dive-each-layer) · [Evaluation](#6-evaluation-layer-ragas)
+[Overview](#overview) · [Architecture](#system-architecture) · [Agent Demo](#agent-in-action) · [Quickstart](#quickstart) · [Pipeline](#pipeline-runbook) · [Deep Dive](#deep-dive-each-layer) · [Metrics Evaluation](#metrics-evaluation) · [Evaluation](#6-evaluation-layer-ragas)
 
 </div>
 
@@ -114,11 +114,13 @@ CODEBASE-RAG/
     ├── evaluation/
     │   ├── loader.py                    # Loads and validates evaluation dataset
     │   ├── ragas_eval.py                # RAGAS metric computation
+    │   ├── metrics.py                   # MetricsEvaluator — Recall@K, latency, cost
     │   ├── run_eval.py                  # Evaluation entrypoint
     │   └── dataset.json                 # Ground-truth Q&A pairs
     ├── utils/
     │   ├── config.py                    # Environment variable loading (Pydantic Settings)
     │   ├── chunk_config.py              # Chunking tunable parameters
+    │   ├── model_config.py              # litellm_model_name() / build_llm_model() factory
     │   └── file_utility.py             # Shared path and I/O helpers
     └── data/chunks/
         ├── code_chunks.jsonl            # Chunking output artifact
@@ -254,7 +256,7 @@ print(context)
 python -m src.evaluation.run_eval
 ```
 
-Runs the RAGAS evaluation suite against `dataset.json` and prints metric scores.
+Runs the RAGAS evaluation suite **plus** the Recall@K / latency / cost metrics (see [Metrics Evaluation](#metrics-evaluation)) against `dataset.json` and prints scores for both.
 
 ---
 
@@ -310,7 +312,7 @@ Naive token-window splitting destroys code semantics — a function split at a r
 
 - Formats each chunk into an embedding-ready string combining code content and metadata (language, file path, symbol name).
 - Calls OpenAI `text-embedding-3-large` model in configurable batches.
-- Upserts vectors and full metadata payloads into a persistent ChromaDB collection.
+- Upserts vectors and full metadata payloads into a persistent ChromaDB collection, indexed with an explicit **cosine** HNSW space.
 - Tracks batch-level operational counters for observability.
 
 **Core files:** `src/embeddings/embeddings_formatter.py`, `src/embeddings/embeddings_client.py`, `src/embeddings/chroma_store.py`, `src/embeddings/embeddings_main.py`
@@ -319,7 +321,7 @@ Naive token-window splitting destroys code semantics — a function split at a r
 
 ### 4 — Retrieval
 
-- Embeds the user's natural language query using the same OpenAI embedding model.
+- Embeds the user's natural language query using the same embedding model.
 - Executes cosine similarity search against the ChromaDB collection.
 - Normalizes raw Chroma results into typed `RetrievalResult` / `RetrievalResponse` objects.
 - Formats retrieved chunks into structured, LLM-ready context blocks with file path and line attribution.
@@ -355,6 +357,36 @@ Evaluation is built in from the start rather than bolted on later.
 Add ground-truth Q&A pairs to `src/evaluation/dataset.json` and run `python -m src.evaluation.run_eval` to score the pipeline end-to-end.
 
 **Core files:** `src/evaluation/loader.py`, `src/evaluation/ragas_eval.py`, `src/evaluation/run_eval.py`
+
+---
+
+## Metrics Evaluation
+
+Beyond RAGAS correctness scores, the pipeline is benchmarked for retrieval quality, latency, and inference cost — computed by `MetricsEvaluator` (`src/evaluation/metrics.py`) and run via `python -m src.evaluation.run_eval`.
+
+**RAG Optimization** — reduced retrieved-context size (`TOP_K` 5 → 3):
+
+| Metric | Before | After | Improvement |
+|---|---|---|---|
+| P95 Latency | 9.65s | 4.66s | **52% faster** |
+| Cost / Query | $0.0109 | $0.0072 | **34% cheaper** |
+
+**RAGAS Evaluation** — 15-query test dataset:
+
+| Metric | Score |
+|---|---|
+| Context Precision | 0.97 |
+| Context Recall | 0.84 |
+
+**Retrieval Recall@K** — fraction of ground-truth relevant files found in the top-K retrieved chunks:
+
+| K | Recall@K |
+|---|---|
+| 3 | 0.711 |
+| 5 | 0.822 |
+| 10 | 0.978 |
+
+**Core files:** `src/evaluation/metrics.py`, `src/evaluation/ragas_eval.py`, `src/evaluation/run_eval.py`
 
 ---
 
