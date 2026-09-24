@@ -1,55 +1,51 @@
 services:
-  # ChromaDB vector store - persistent HTTP server
-  chroma:
-    image: chromadb/chroma:latest
-    ports:
-      - "8001:8000"
-    volumes:
-      - chroma_data:/chroma/chroma
-    environment:
-      IS_PERSISTENT: "TRUE"
-      ANONYMIZED_TELEMETRY: "FALSE"
-    restart: unless-stopped
+  # Vector store: there is no local Qdrant service. api and celery_worker
+  # connect to the Qdrant Cloud cluster named by QDRANT_URL + QDRANT_API_KEY,
+  # which they read from .env via env_file (CLAUDE.md §20). One shared
+  # collection; every point carries a repo_id payload field that searches
+  # filter on.
 
-  # Step 1: AST-chunk the target repository
-  # Set HOST_REPO_PATH in .env to the local path of the repo you want to index
-  chunk:
-    build: .
-    volumes:
-      - ./src/data:/app/src/data
-      - ${HOST_REPO_PATH}:/repo:ro
-    env_file: .env
-    environment:
-      REPO_PATH: /repo
-      CHUNKS_JSON_PATH: /app/src/data/chunks/code_chunks.jsonl
-    command: python -m chunking.chunk_main
+  # Redis: there is no local Redis service either. The Celery broker + result
+  # backend and the shared RedisStatusStore use the Redis Cloud database named
+  # by REDIS_URL / CELERY_BROKER_URL / CELERY_RESULT_BACKEND in .env (read via
+  # env_file). The answer cache (exact + semantic) is Redis LangCache, reached
+  # through its API (LANGCACHE_* in .env).
 
-  # Step 2: Embed chunks and store in ChromaDB
-  embed:
+  # FastAPI app: POST /api/repos, GET /api/repos/{id}, POST /api/repos/{id}/chat.
+  # Enqueues ingestion onto Celery instead of running it inline — see
+  # src/api/dependencies.py (RagWorkflowFacade.enqueue_ingestion).
+  api:
     build: .
-    volumes:
-      - ./src/data:/app/src/data
-    env_file: .env
-    environment:
-      CHUNKS_JSON_PATH: /app/src/data/chunks/code_chunks.jsonl
-      CHROMA_HOST: chroma
-      CHROMA_PORT: "8000"
-    depends_on:
-      - chroma
-    command: python -m embeddings.embeddings_main
-
-  # Step 3: Run the ADK agent web server
-  agent:
-    build: .
+    image: codebase-rag-backend:latest
     ports:
       - "8000:8000"
     env_file: .env
-    environment:
-      CHROMA_HOST: chroma
-      CHROMA_PORT: "8000"
-    depends_on:
-      - chroma
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
 
-volumes:
-  chroma_data:
+  # Celery worker(s): runs ingest_repo_task (src/worker/tasks.py) — the
+  # clone -> chunk -> embed -> store pipeline — off the API process, so a
+  # slow/large ingestion never blocks other users' requests. Scale with
+  # `docker-compose up --scale celery_worker=N` for more ingestion throughput.
+  celery_worker:
+    build: .
+    image: codebase-rag-backend:latest
+    env_file: .env
+    command: celery -A worker.celery_app worker --pool=solo --without-gossip --without-mingle --loglevel=debug
+    restart: unless-stopped
+
+  # React/TS SPA (src/frontend/), built and served by nginx. VITE_API_BASE_URL
+  # is compiled into the JS bundle at image-build time (Vite inlines
+  # import.meta.env.* — it is NOT read at container start), so it must be the
+  # URL your browser can reach, not the internal "api" service name. Default
+  # below matches the api service's host port mapping (8000:8000).
+  frontend:
+    build:
+      context: ./src/frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+    restart: unless-stopped

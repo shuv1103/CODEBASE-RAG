@@ -26,7 +26,8 @@ from ragas.metrics import (
 )
 
 load_dotenv()
-logging.basicConfig()
+
+logger = logging.getLogger(__name__)
 
 _LANGSMITH_ENABLED = (
     os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true"
@@ -43,6 +44,11 @@ _REQUIRED_ENV_VARS = [
 
 
 def _validate_env() -> None:
+    """Fail fast if the RAGAS evaluator's required environment variables are unset.
+
+    Raises:
+        ValueError: If any of _REQUIRED_ENV_VARS is missing.
+    """
     missing = [var for var in _REQUIRED_ENV_VARS if not os.getenv(var)]
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
@@ -54,50 +60,72 @@ def _validate_env() -> None:
 # in newer ragas versions (DeprecationHelper blocks it).
 
 class _ThrottledChatOpenAI(ChatOpenAI):
-    """ChatOpenAI with a per-call sleep to honour OpenAI rate limits."""
+    """ChatOpenAI with a per-call sleep to honour OpenAI rate limits.
+
+    Attributes:
+        sleep_seconds: Delay before every generation call.
+    """
 
     sleep_seconds: float = 2.0
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        """Sleep sleep_seconds, then delegate to ChatOpenAI._generate."""
         time.sleep(self.sleep_seconds)
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        """Sleep sleep_seconds, then delegate to ChatOpenAI._agenerate."""
         await asyncio.sleep(self.sleep_seconds)
         return await super()._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
 class _ThrottledOpenAIEmbeddings(OpenAIEmbeddings):
-    """OpenAIEmbeddings with a per-call sleep to honour OpenAI rate limits."""
+    """OpenAIEmbeddings with a per-call sleep to honour OpenAI rate limits.
+
+    Attributes:
+        sleep_seconds: Delay before every embedding call.
+    """
 
     sleep_seconds: float = 1.0
 
     def embed_documents(self, texts, **kwargs):
+        """Sleep sleep_seconds, then delegate to OpenAIEmbeddings.embed_documents."""
         time.sleep(self.sleep_seconds)
         return super().embed_documents(texts, **kwargs)
 
     def embed_query(self, text, **kwargs):
+        """Sleep sleep_seconds, then delegate to OpenAIEmbeddings.embed_query."""
         time.sleep(self.sleep_seconds)
         return super().embed_query(text, **kwargs)
 
     async def aembed_documents(self, texts, **kwargs):
+        """Sleep sleep_seconds, then delegate to OpenAIEmbeddings.aembed_documents."""
         await asyncio.sleep(self.sleep_seconds)
         return await super().aembed_documents(texts, **kwargs)
 
     async def aembed_query(self, text, **kwargs):
+        """Sleep sleep_seconds, then delegate to OpenAIEmbeddings.aembed_query."""
         await asyncio.sleep(self.sleep_seconds)
         return await super().aembed_query(text, **kwargs)
 
 
 class RagasEvaluator:
-    """
-    Evaluates RAG system performance using RAGAS with OpenAI.
+    """Evaluates RAG system performance using RAGAS with OpenAI.
 
     Metrics:
     - faithfulness       → hallucination check
     - answer_relevancy   → generation quality
     - context_precision  → retrieval relevance
     - context_recall     → retrieval completeness
+
+    Raises:
+        ValueError: If OPENAI_API_KEY, OPENAI_LLM_MODEL, or
+            OPENAI_EMBEDDING_MODEL is not set.
+
+    Example:
+        >>> evaluator = RagasEvaluator()
+        >>> results_df = evaluator.evaluate(records)
+        >>> print(RagasEvaluator.summarize(results_df))
     """
 
     def __init__(self) -> None:
@@ -124,6 +152,14 @@ class RagasEvaluator:
 
     @staticmethod
     def _to_dataset(records: List[Dict[str, Any]]) -> Dataset:
+        """Convert eval records into a column-oriented HuggingFace Dataset.
+
+        Args:
+            records: Validated eval dataset records.
+
+        Returns:
+            Dataset with question, answer, contexts, and ground_truth columns.
+        """
         return Dataset.from_dict({
             "question":     [r["question"]     for r in records],
             "answer":       [r["answer"]       for r in records],
@@ -136,6 +172,17 @@ class RagasEvaluator:
     # ------------------------------------------------------------------
 
     def evaluate(self, records: List[Dict[str, Any]]) -> pd.DataFrame:
+        """Score every record on the four RAGAS metrics.
+
+        Runs serially (one worker, batch size 1) to stay under OpenAI rate
+        limits.
+
+        Args:
+            records: Validated eval dataset records.
+
+        Returns:
+            One row per record with a column per metric.
+        """
         dataset = self._to_dataset(records)
 
         result = evaluate(
@@ -156,6 +203,15 @@ class RagasEvaluator:
 
     @staticmethod
     def summarize(results_df: pd.DataFrame) -> Dict[str, float]:
+        """Average each RAGAS metric column.
+
+        Args:
+            results_df: Output of evaluate().
+
+        Returns:
+            Metric name -> mean score rounded to 4 places, for metrics
+            present in the frame.
+        """
         return {
             metric: round(float(results_df[metric].mean()), 4)
             for metric in _METRICS
@@ -171,8 +227,17 @@ class RagasEvaluator:
         records: List[Dict[str, Any]],
         dataset_name: str,
     ) -> None:
+        """Upload questions and ground truths as LangSmith dataset examples.
+
+        Creates the dataset if needed, otherwise appends to the existing one.
+        Skipped when LangSmith tracing is disabled.
+
+        Args:
+            records: Validated eval dataset records.
+            dataset_name: LangSmith dataset to create or reuse.
+        """
         if not _LANGSMITH_ENABLED:
-            print("LangSmith tracing disabled — skipping dataset upload.")
+            logger.info("LangSmith tracing disabled — skipping dataset upload.")
             return
 
         import langsmith
@@ -189,7 +254,7 @@ class RagasEvaluator:
             outputs=[{"ground_truth": r["ground_truth"]} for r in records],
             dataset_id=dataset.id,
         )
-        print(f"Uploaded {len(records)} examples to LangSmith dataset '{dataset_name}'.")
+        logger.info("Uploaded %d examples to LangSmith dataset %r.", len(records), dataset_name)
 
     # ------------------------------------------------------------------
     # LANGSMITH — log evaluation results
@@ -202,8 +267,18 @@ class RagasEvaluator:
         dataset_name: str,
         experiment_name: str,
     ) -> None:
+        """Log one LangSmith run per record with its answer and RAGAS scores.
+
+        Skipped when LangSmith tracing is disabled.
+
+        Args:
+            records: Eval dataset records, aligned with results_df rows.
+            results_df: Output of evaluate().
+            dataset_name: Existing LangSmith dataset the runs reference.
+            experiment_name: Name given to each logged run.
+        """
         if not _LANGSMITH_ENABLED:
-            print("LangSmith tracing disabled — skipping results logging.")
+            logger.info("LangSmith tracing disabled — skipping results logging.")
             return
 
         import langsmith
@@ -226,4 +301,4 @@ class RagasEvaluator:
                 },
                 reference_dataset_id=dataset.id,
             )
-        print(f"Logged {len(records)} results to LangSmith experiment '{experiment_name}'.")
+        logger.info("Logged %d results to LangSmith experiment %r.", len(records), experiment_name)

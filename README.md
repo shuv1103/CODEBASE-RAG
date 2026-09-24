@@ -6,13 +6,14 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Google ADK](https://img.shields.io/badge/Google%20ADK-1.31.1-4285F4?style=flat-square&logo=google&logoColor=white)
-![Gemini](https://img.shields.io/badge/Gemini-2.0%20Flash-8E75B2?style=flat-square&logo=google&logoColor=white)
-![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector%20Store-FF6B35?style=flat-square)
+![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=flat-square&logo=openai&logoColor=white)
+![Qdrant](https://img.shields.io/badge/Qdrant-Vector%20Store-DC244C?style=flat-square)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![RAGAS](https://img.shields.io/badge/Evaluation-RAGAS-22c55e?style=flat-square)
-![License](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)
+![Celery](https://img.shields.io/badge/Celery-37814A?style=flat-square&logo=celery&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-DD0031?style=flat-square&logo=redis&logoColor=white)
 
-[Overview](#overview) · [Architecture](#system-architecture) · [Agent Demo](#agent-in-action) · [Quickstart](#quickstart) · [Pipeline](#pipeline-runbook) · [Deep Dive](#deep-dive-each-layer) · [Evaluation](#6-evaluation-layer-ragas)
+[Overview](#overview) · [Architecture](#system-architecture) · [Agent Demo](#agent-in-action) · [Quickstart](#quickstart) · [Pipeline](#pipeline-runbook) · [Deep Dive](#deep-dive-each-layer) · [Metrics Evaluation](#metrics-evaluation) · [Evaluation](#6-evaluation-layer-ragas)
 
 </div>
 
@@ -22,7 +23,7 @@
 
 Most code-search tools do text matching. This project builds a **semantic understanding layer** over an entire software repository using a production-grade RAG pipeline.
 
-Point it at any codebase. It ingests every source file, chunks code along **AST boundaries** (not arbitrary token windows), embeds each chunk with Google's embedding model, and stores everything in **ChromaDB**. A **Google ADK agent** then answers developer questions by first retrieving the most relevant code evidence — and only then generating a response.
+Point it at any codebase. It ingests every source file, chunks code along **AST boundaries** (not arbitrary token windows), embeds each chunk with Google's embedding model, and stores everything in **Qdrant**. A **Google ADK agent** then answers developer questions by first retrieving the most relevant code evidence — and only then generating a response.
 
 Ask *"Where is JWT authentication implemented?"* and get back the exact files, classes, and methods — not a hallucinated description.
 
@@ -32,7 +33,7 @@ Ask *"Where is JWT authentication implemented?"* and get back the exact files, c
 |---|---|
 | AST-aware chunking | Splits at function/class boundaries, preserves dependency overlap |
 | Metadata-rich vectors | Language, file path, symbol name, line range stored alongside embeddings |
-| Persistent vector store | ChromaDB with batch upsert and incremental re-indexing |
+| Persistent vector store | Qdrant (HNSW, cosine): one collection, per-repo `repo_id` filtering, idempotent batch upserts |
 | Grounded ADK agent | Tool-first architecture: `retrieve_code_context` fires before any generation |
 | Full observability | LangSmith integration shows every tool call, LLM usage, etc lifecycle |
 | RAGAS evaluation | Faithfulness, answer relevancy, context precision & recall |
@@ -50,7 +51,7 @@ Ask *"Where is JWT authentication implemented?"* and get back the exact files, c
 
 ## DEMO(Screenshot)
 
-> Tested against a **Hospital Management System** codebase (React + Spring Boot) using the **Google ADK UI **.
+> Tested against a **Hospital Management System** sample codebase (React + Spring Boot) using the **Google ADK UI **.
 
 <img width="1900" height="754" alt="image" src="https://github.com/user-attachments/assets/0da3e72b-5133-4c27-b152-4ac88037aa97" />
 
@@ -63,7 +64,7 @@ The agent `codebase_rag_agent` is asked a real architectural question:
 
 Here is what happens, step by step:
 
-1. **Tool invocation** — The agent immediately fires the `retrieve_code_context` tool (events `#6` and `#7` in the Traces panel), searching the ChromaDB vector store for authentication-related code chunks.
+1. **Tool invocation** — The agent immediately fires the `retrieve_code_context` tool (events `#6` and `#7` in the Traces panel), searching the Qdrant vector store for authentication-related code chunks.
 
 2. **Grounded answer** — The agent identifies **JWT (JSON Web Token)** based authentication and cites three specific files retrieved from the index:
    - **`JwtTokenProvider.java`** — Core logic for generating, validating, and extracting JWT claims. Contains `generateToken`, `getAuthentication`, and `validateToken` methods.
@@ -101,12 +102,12 @@ CODEBASE-RAG/
     │   ├── embeddings_models.py         # Pydantic models: EmbeddingRecord, BatchStats
     │   ├── embeddings_formatter.py      # Builds embedding-ready text from chunk + metadata
     │   ├── embeddings_client.py         # Google embedding API wrapper
-    │   ├── chroma_store.py             # ChromaDB collection management + batch upsert
+    │   ├── qdrant_store.py             # Qdrant collection + tenant index, batch upsert
     │   └── embeddings_main.py          # Pipeline entrypoint
     ├── retrieval/
     │   ├── retrieval_models.py          # Pydantic models: RetrievalResult, RetrievalResponse
     │   ├── query_embedder.py            # Converts query text to embedding vector
-    │   ├── chroma_retriever.py          # Vector similarity search against ChromaDB
+    │   ├── qdrant_retriever.py          # repo_id-filtered similarity search against Qdrant
     │   └── retrieval_service.py         # Orchestrates query → retrieval → format
     ├── codebase_rag_agent/
     │   ├── tools.py                     # retrieve_code_context ADK tool definition
@@ -114,11 +115,13 @@ CODEBASE-RAG/
     ├── evaluation/
     │   ├── loader.py                    # Loads and validates evaluation dataset
     │   ├── ragas_eval.py                # RAGAS metric computation
+    │   ├── metrics.py                   # MetricsEvaluator — Recall@K, latency, cost
     │   ├── run_eval.py                  # Evaluation entrypoint
     │   └── dataset.json                 # Ground-truth Q&A pairs
     ├── utils/
     │   ├── config.py                    # Environment variable loading (Pydantic Settings)
     │   ├── chunk_config.py              # Chunking tunable parameters
+    │   ├── model_config.py              # litellm_model_name() / build_llm_model() factory
     │   └── file_utility.py             # Shared path and I/O helpers
     └── data/chunks/
         ├── code_chunks.jsonl            # Chunking output artifact
@@ -151,14 +154,14 @@ Run the three pipeline stages in order:
 # 1. Chunk your target codebase
 python -m src.chunking.chunk_main
 
-# 2. Embed chunks and index into ChromaDB
+# 2. Embed chunks and index into Qdrant
 python -m src.embeddings.embeddings_main
 
 # 3. Launch the ADK agent web server
 adk web --host 0.0.0.0 --port 8000
 ```
 
-Open `http://localhost:8000` in your browser — the ADK UI is ready.
+Local Testing - Open `http://localhost:8000` in your browser — the ADK UI is ready.
 
 ---
 
@@ -170,14 +173,14 @@ Set `HOST_REPO_PATH` in your `.env` to the absolute path of the repository you w
 # Stage 1: AST-chunk the target repository
 docker compose run --rm chunk
 
-# Stage 2: Embed chunks and persist to ChromaDB
+# Stage 2: Embed chunks and persist to Qdrant
 docker compose run --rm embed
 
 # Stage 3: Start the agent server (stays up)
 docker compose up agent
 ```
 
-The agent is served at `http://localhost:8000`.
+Local Testing - The agent is served at `http://localhost:8000`.
 
 ---
 
@@ -201,11 +204,11 @@ EMBEDDING_BATCH_SIZE=20
 TOP_K=5
 
 # Agent
-AGENT_MODEL=gemini-2.0-flash
+AGENT_MODEL=your-llm(suggest - pick a smaller model)
 
 # Evaluation
 EVALUATION_DATASET_PATH=src/evaluation/dataset.json
-EVALUATION_LLM_MODEL=gemini-2.0-flash
+EVALUATION_LLM_MODEL=your-llm(suggest - pick a larger model)
 ```
 
 ---
@@ -233,7 +236,7 @@ chunk_manifest.json     ← run stats: files scanned, chunks produced, languages
 python -m src.embeddings.embeddings_main
 ```
 
-Reads `code_chunks.jsonl`, generates Google embeddings in configurable batches, and upserts into ChromaDB. Idempotent — re-running updates existing vectors.
+Reads `code_chunks.jsonl`, generates Google embeddings in configurable batches, and upserts into Qdrant. Idempotent — re-running updates existing vectors.
 
 ### C) Retrieve programmatically
 
@@ -254,7 +257,7 @@ print(context)
 python -m src.evaluation.run_eval
 ```
 
-Runs the RAGAS evaluation suite against `dataset.json` and prints metric scores.
+Runs the RAGAS evaluation suite **plus** the Recall@K / latency / cost metrics (see [Metrics Evaluation](#metrics-evaluation)) against `dataset.json` and prints scores for both.
 
 ---
 
@@ -265,7 +268,7 @@ Runs the RAGAS evaluation suite against `dataset.json` and prints metric scores.
 - Walks the repository tree and filters by supported file extensions.
 - Skips build artifacts, dependency directories (`node_modules`, `__pycache__`, `.git`, etc.).
 - Produces typed `FileDocument` objects with language, path, and raw content.
-- Detects language from extension: Python, JS/TS, Java, C#, C/C++, Rust, Go, and more.
+- Detects language from extension: Python, JS/TS, Java, C#, C/C++, Rust, Go, Dart, and more.
 
 **Core files:** `src/ingestion/repo_loader.py`, `src/ingestion/language_detector.py`, `src/utils/config.py`
 
@@ -309,22 +312,22 @@ Naive token-window splitting destroys code semantics — a function split at a r
 ### 3 — Embedding and Vectorization
 
 - Formats each chunk into an embedding-ready string combining code content and metadata (language, file path, symbol name).
-- Calls Google's `text-embedding-004` model in configurable batches.
-- Upserts vectors and full metadata payloads into a persistent ChromaDB collection.
+- Calls OpenAI `text-embedding-3-large` model in configurable batches.
+- Upserts vectors and full metadata payloads into a persistent Qdrant collection (cosine distance, HNSW index), each point tagged with its `repo_id`.
 - Tracks batch-level operational counters for observability.
 
-**Core files:** `src/embeddings/embeddings_formatter.py`, `src/embeddings/embeddings_client.py`, `src/embeddings/chroma_store.py`, `src/embeddings/embeddings_main.py`
+**Core files:** `src/embeddings/embeddings_formatter.py`, `src/embeddings/embeddings_client.py`, `src/embeddings/qdrant_store.py`, `src/embeddings/embeddings_main.py`
 
 ---
 
 ### 4 — Retrieval
 
-- Embeds the user's natural language query using the same Google embedding model.
-- Executes cosine similarity search against the ChromaDB collection.
-- Normalizes raw Chroma results into typed `RetrievalResult` / `RetrievalResponse` objects.
+- Embeds the user's natural language query using the same embedding model.
+- Executes cosine similarity search against Qdrant, filtered to the repo's `repo_id`.
+- Normalizes raw Qdrant results into typed `RetrievalResult` / `RetrievalResponse` objects.
 - Formats retrieved chunks into structured, LLM-ready context blocks with file path and line attribution.
 
-**Core files:** `src/retrieval/query_embedder.py`, `src/retrieval/chroma_retriever.py`, `src/retrieval/retrieval_service.py`, `src/retrieval/retrieval_models.py`
+**Core files:** `src/retrieval/query_embedder.py`, `src/retrieval/qdrant_retriever.py`, `src/retrieval/retrieval_service.py`, `src/retrieval/retrieval_models.py`
 
 ---
 
@@ -358,6 +361,36 @@ Add ground-truth Q&A pairs to `src/evaluation/dataset.json` and run `python -m s
 
 ---
 
+## Metrics Evaluation
+
+Beyond RAGAS correctness scores, the pipeline is benchmarked for retrieval quality, latency, and inference cost — computed by `MetricsEvaluator` (`src/evaluation/metrics.py`) and run via `python -m src.evaluation.run_eval`.
+
+**RAG Optimization** — reduced retrieved-context size (`TOP_K` 5 → 3):
+
+| Metric | Before | After | Improvement |
+|---|---|---|---|
+| P95 Latency | 9.65s | 4.66s | **52% faster** |
+| Cost / Query | $0.0109 | $0.0072 | **34% cheaper** |
+
+**RAGAS Evaluation** — 15-query test dataset:
+
+| Metric | Score |
+|---|---|
+| Context Precision | 0.97 |
+| Context Recall | 0.84 |
+
+**Retrieval Recall@K** — fraction of ground-truth relevant files found in the top-K retrieved chunks:
+
+| K | Recall@K |
+|---|---|
+| 3 | 0.711 |
+| 5 | 0.822 |
+| 10 | 0.978 |
+
+**Core files:** `src/evaluation/metrics.py`, `src/evaluation/ragas_eval.py`, `src/evaluation/run_eval.py`
+
+---
+
 ## Engineering Decisions
 
 **1. AST-first chunking over sliding windows** — Token windows split at arbitrary positions, destroying function bodies and class hierarchies. AST boundaries guarantee every chunk is a syntactically valid, semantically meaningful unit. Retrieval quality depends entirely on chunk quality.
@@ -368,4 +401,4 @@ Add ground-truth Q&A pairs to `src/evaluation/dataset.json` and run `python -m s
 
 **4. Tool-based ADK agent** — Wrapping retrieval as a mandatory tool forces the LLM into a retrieve-then-generate pattern. Without this constraint, instruction-following alone is insufficient to prevent hallucination on large codebases.
 
-**5. Docker-native pipeline** — Each stage (chunk, embed, agent) is a standalone Compose service. The target repository is mounted read-only. The ChromaDB data volume is shared across services. No state leaks between runs.
+**5. Docker-native pipeline** — Each stage (chunk, embed, agent) is a standalone Compose service. The target repository is mounted read-only. The Qdrant data volume is shared across services. No state leaks between runs.

@@ -1,5 +1,3 @@
-from pathlib import Path
-
 # Supported source file extensions
 SUPPORTED_EXTENSIONS = {
     ".py",
@@ -15,8 +13,11 @@ SUPPORTED_EXTENSIONS = {
     ".h",
     ".hpp",
     ".cs",
+    ".dart",
     ".html",
     ".css",
+    ".md",
+    ".markdown",
 }
 
 # Directories to skip during traversal

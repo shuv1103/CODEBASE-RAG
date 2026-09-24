@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from .chroma_retriever import ChromaRetriever
+from .qdrant_retriever import QdrantRetriever
 from .query_embedder import QueryEmbedder
 from .retrieval_models import RetrievalResponse
 
@@ -8,33 +8,40 @@ load_dotenv()
 
 
 class RetrievalService:
-    """
-    High-level retrieval orchestration service.
+    """High-level retrieval orchestration service.
 
     Responsibilities:
     1. Convert user query into embedding
-    2. Query Chroma vector store
+    2. Query the Qdrant vector store, scoped to one repo
     3. Return structured retrieval response
     4. Optionally format retrieval results into grounded LLM context
+
+    Args:
+        repo_id: Repository to search. None searches every repo in the
+            collection (local dev tooling and evaluation).
+
+    Example:
+        >>> service = RetrievalService(repo_id="c3460b930023")
+        >>> context = service.retrieve_as_context("How is auth handled?")
     """
 
-    def __init__(self) -> None:
-        chroma_host = os.getenv("CHROMA_HOST")
-        vector_store_path = os.getenv("VECTOR_STORE_PATH")
-        collection_name = os.getenv("VECTOR_STORE_COLLECTION_NAME", "code_chunks")
-
-        if not chroma_host and not vector_store_path:
-            raise ValueError("Either CHROMA_HOST or VECTOR_STORE_PATH must be set in .env")
-
+    def __init__(self, repo_id: str | None = None) -> None:
         self._query_embedder = QueryEmbedder()
-        self._retriever = ChromaRetriever(
-            persist_dir=vector_store_path,
-            collection_name=collection_name,
-        )
+        self._retriever = QdrantRetriever(repo_id=repo_id)
 
     def retrieve(self, query: str, top_k: int | None = None) -> RetrievalResponse:
-        """
-        Retrieve top-k relevant code chunks for a natural language query.
+        """Retrieve the top-k relevant code chunks for a natural language query.
+
+        Args:
+            query: Natural language user query.
+            top_k: Number of chunks to return. Defaults to the TOP_K env
+                var (5 if unset).
+
+        Returns:
+            RetrievalResponse with the ranked chunks.
+
+        Raises:
+            ValueError: If the query is empty or whitespace-only.
         """
         if not query or not query.strip():
             raise ValueError("Query cannot be empty")
@@ -51,9 +58,20 @@ class RetrievalService:
         )
 
     def retrieve_as_context(self, query: str, top_k: int | None = None) -> str:
-        """
-        Retrieve relevant code chunks and format them into a grounded textual context
-        suitable for an LLM prompt/tool response.
+        """Retrieve relevant chunks and format them as grounded LLM context.
+
+        The output is suitable for an LLM prompt or tool response.
+
+        Args:
+            query: Natural language user query.
+            top_k: Number of chunks to include. Defaults to the TOP_K env var.
+
+        Returns:
+            One "[Chunk N]" text block per chunk (path, language, symbol,
+            lines, score, code), or a fixed message when nothing matched.
+
+        Raises:
+            ValueError: If the query is empty or whitespace-only.
         """
         response = self.retrieve(query=query, top_k=top_k)
 
@@ -83,6 +101,15 @@ class RetrievalService:
 
     @staticmethod
     def _format_symbol(symbol_name: str | None, parent_symbol: str | None) -> str:
+        """Format the "Symbol:" line of a context block.
+
+        Args:
+            symbol_name: Chunk's symbol name, if any.
+            parent_symbol: Enclosing symbol name, if any.
+
+        Returns:
+            "Symbol: parent.name\\n", "Symbol: name\\n", or "" when unknown.
+        """
         if symbol_name and parent_symbol:
             return f"Symbol: {parent_symbol}.{symbol_name}\n"
         if symbol_name:
@@ -91,6 +118,15 @@ class RetrievalService:
 
     @staticmethod
     def _format_location(start_line: int | None, end_line: int | None) -> str:
+        """Format the line-range line of a context block.
+
+        Args:
+            start_line: First line of the chunk, if known.
+            end_line: Last line of the chunk, if known.
+
+        Returns:
+            "Lines: a-b\\n", "Start Line: a\\n", or "" when unknown.
+        """
         if start_line is not None and end_line is not None:
             return f"Lines: {start_line}-{end_line}\n"
         if start_line is not None:

@@ -3,12 +3,43 @@ from .embeddings_models import EmbeddedChunk
 
 
 def estimate_token_count(text: str) -> int:
+    """Roughly estimate a text's token count as len(text) // 4.
+
+    Args:
+        text: Text to measure.
+
+    Returns:
+        0 for empty text, otherwise at least 1.
+
+    Example:
+        >>> estimate_token_count("def f(): pass")
+        3
+    """
     if not text:
         return 0
     return max(1, len(text) // 4)
 
 
 def build_embedding_input_text(chunk: Dict[str, Any]) -> str:
+    """Build the text that gets embedded for a chunk.
+
+    Prefixes the code with File/Path/Language and, when known, Symbol and
+    Lines headers so the embedding captures where the code lives.
+
+    Args:
+        chunk: Serialized CodeChunk dict with "content" and "metadata".
+
+    Returns:
+        The newline-joined header lines followed by "Code:" and the content.
+
+    Example:
+        >>> build_embedding_input_text({
+        ...     "content": "def f(): pass",
+        ...     "metadata": {"file_name": "a.py", "relative_path": "pkg/a.py",
+        ...                  "language": "python", "start_line": 0, "end_line": 0},
+        ... })
+        'File: a.py\\nPath: pkg/a.py\\nLanguage: python\\nLines: 0-0\\nCode:\\ndef f(): pass'
+    """
     content = chunk.get("content", "")
     metadata = chunk.get("metadata", {}) or {}
 
@@ -42,6 +73,17 @@ def build_embedded_chunk(
     vector: List[float],
     model_name: str,
 ) -> EmbeddedChunk:
+    """Combine a serialized chunk and its vector into an EmbeddedChunk.
+
+    Args:
+        raw_chunk: Serialized CodeChunk dict with "content" and "metadata".
+        vector: Embedding vector for the chunk.
+        model_name: Embedding model that produced the vector.
+
+    Returns:
+        The EmbeddedChunk, with embedding_input_text and token_estimate
+        derived from the chunk.
+    """
     metadata = raw_chunk.get("metadata", {}) or {}
     extra = metadata.get("extra", {}) or {}
 
@@ -57,6 +99,8 @@ def build_embedded_chunk(
         parent_symbol=extra.get("parent_symbol"),
         start_line=metadata.get("start_line"),
         end_line=metadata.get("end_line"),
+        repo_id=metadata.get("repo_id", ""),
+        source_url=metadata.get("source_url", ""),
         content=raw_chunk.get("content"),
         embedding_input_text=embedding_input_text,
         embedding_model=model_name,

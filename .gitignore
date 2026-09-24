@@ -1,6 +1,6 @@
 # Environment files
 .env
-.env.*
+.env.local
 
 # Public/example project artifacts (don't commit large example repos)
 /public/
@@ -22,12 +22,11 @@ venv/
 venv*/
 # Environment files
 .env
-.env.*
+.env.local
 
 # Public/example project artifacts (don't commit large example repos)
-/public/
-/src/public/
 
+.public/ 
 # Storage and vector DB artifacts
 /storage/
 /data/vector_store/
@@ -45,3 +44,55 @@ venv*/
 rag-implement
 
 /docs/
+
+CLAUDE.md
+
+# Internal docs / notes - not for public repo
+architecture.md
+code_quality.md
+github_readme.md
+python_concepts.md
+Interview-QS.md
+image.png
+issue_1.png
+
+# Node dependencies (src/frontend/)
+src/frontend/node_modules/
+src/frontend/dist/
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+# foglamp scan artifacts (scan.lock.json holds a secret edit token)
+.foglamp/
+
+# Local vector store + chunk output. The real paths are under src/data/
+# (VECTOR_STORE_PATH=data/chunks, run from src/); the /data/... rules above
+# only match a top-level data/ folder. The Dockerfile recreates
+# src/data/chunks, so nothing here is needed for a Render build.
+src/data/
+
+# Any env file with real values; only the templates are committed
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local tooling, caches, and run output
+.claude/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.egg-info/
+.coverage
+htmlcov/
+*.log
+dump.rdb
+celerybeat-schedule*
+src/evaluation/results.txt
+
+

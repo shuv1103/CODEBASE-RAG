@@ -4,8 +4,7 @@ from typing import Any, Dict, List
 
 
 class EvaluationDatasetLoader:
-    """
-    Loads and validates a RAG evaluation dataset from a JSON file.
+    """Loads and validates a RAG evaluation dataset from a JSON file.
 
     Expected schema for each record:
     {
@@ -14,12 +13,31 @@ class EvaluationDatasetLoader:
         "contexts": list[str],
         "ground_truth": str
     }
+
+    Attributes:
+        REQUIRED_FIELDS: Keys every record must contain.
+
+    Example:
+        >>> records = EvaluationDatasetLoader.load_json("evaluation/dataset.json")
     """
 
     REQUIRED_FIELDS = {"question", "answer", "contexts", "ground_truth"}
 
     @classmethod
     def load_json(cls, file_path: str | Path) -> List[Dict[str, Any]]:
+        """Load a dataset file and validate every record.
+
+        Args:
+            file_path: Path of the JSON dataset (a top-level array).
+
+        Returns:
+            The validated list of records.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            ValueError: If the path is not a file, the JSON is not an
+                array, or any record fails validation.
+        """
         path = Path(file_path)
 
         if not path.exists():
@@ -39,6 +57,14 @@ class EvaluationDatasetLoader:
 
     @classmethod
     def _validate(cls, data: List[Dict[str, Any]]) -> None:
+        """Check each record's required fields, types, and non-emptiness.
+
+        Args:
+            data: Parsed dataset records.
+
+        Raises:
+            ValueError: On the first invalid record, naming its index.
+        """
         for idx, row in enumerate(data):
             if not isinstance(row, dict):
                 raise ValueError(f"Record at index {idx} must be a JSON object.")

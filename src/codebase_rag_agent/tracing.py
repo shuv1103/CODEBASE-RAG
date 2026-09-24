@@ -21,6 +21,17 @@ _runs: dict[str, dict] = {}
 
 
 def _extract_messages(llm_request: LlmRequest) -> list[dict]:
+    """Flatten an LLM request's contents into role/content messages.
+
+    Tool calls and tool results are rendered as "[tool_call: name]" /
+    "[tool_result: name]" placeholders.
+
+    Args:
+        llm_request: The ADK request about to be sent to the model.
+
+    Returns:
+        One {"role", "content"} dict per request content.
+    """
     messages = []
     for content in llm_request.contents:
         parts_text = []
@@ -36,6 +47,15 @@ def _extract_messages(llm_request: LlmRequest) -> list[dict]:
 
 
 def _extract_llm_output(llm_response: LlmResponse) -> str:
+    """Render an LLM response's text and tool calls as a single string.
+
+    Args:
+        llm_response: The ADK response returned by the model.
+
+    Returns:
+        "[error] ..." for an error response, "" for an empty one, otherwise
+        the space-joined text parts and "[tool_call: name(args)]" markers.
+    """
     if llm_response.error_message:
         return f"[error] {llm_response.error_message}"
     if not llm_response.content or not llm_response.content.parts:
@@ -51,7 +71,68 @@ def _extract_llm_output(llm_response: LlmResponse) -> str:
     return " ".join(parts_text)
 
 
+def log_cache_event(
+    repo_id: str,
+    outcome: str,
+    user_query: str,
+    nearest_similarity: Optional[float] = None,
+) -> None:
+    """Post a cache hit/miss as its own root LangSmith chain run.
+
+    No-op when tracing is disabled; tracing errors are swallowed.
+
+    Args:
+        repo_id: Repo the chat turn was scoped to.
+        outcome: "exact_hit" | "semantic_hit" | "miss" | "blocked".
+        user_query: The user's chat message.
+        nearest_similarity: Nearest cached query's cosine similarity, when
+            the semantic tier was queried.
+    """
+    # Cache hits/misses happen in api/dependencies.py, before (or instead
+    # of) any ADK agent/model/tool callback above ever fires — without this,
+    # a cache hit is invisible to the same root-chain, is_root=True queries
+    # §5.1 runs for P95 latency, silently skewing those numbers toward
+    # cache-miss traffic only.
+    #
+    # user_query is included in the output (not just inputs) so a hit/miss
+    # trace is traceable/debuggable on its own in the LangSmith UI without
+    # having to cross-reference the input panel separately.
+    #
+    # nearest_similarity is the matched cache entry's similarity, rounded to
+    # 2 decimal places (see SemanticCacheRepository.lookup /
+    # SemanticLookupResult) — 1.0 on "exact_hit", the LangCache similarity on
+    # "semantic_hit". None on "miss" (LangCache only returns entries above
+    # its similarity threshold) and on "blocked".
+    if not _TRACING_ENABLED:
+        return
+    try:
+        outputs = {"cache_outcome": outcome, "user_query": user_query}
+        if nearest_similarity is not None:
+            outputs["nearest_similarity"] = nearest_similarity
+
+        run = RunTree(
+            name=f"semantic_cache_{outcome}",
+            run_type="chain",
+            inputs={"repo_id": repo_id, "user_query": user_query},
+            project_name=_PROJECT,
+            client=_client,
+        )
+        run.post()
+        run.end(outputs=outputs)
+        run.patch()
+    except Exception:
+        pass
+
+
 def before_agent_callback(callback_context: CallbackContext) -> None:
+    """ADK callback: open the root LangSmith chain run for an invocation.
+
+    Args:
+        callback_context: ADK context for the agent invocation.
+
+    Returns:
+        None, so ADK proceeds with the agent run.
+    """
     if not _TRACING_ENABLED:
         return None
     try:
@@ -77,6 +158,14 @@ def before_agent_callback(callback_context: CallbackContext) -> None:
 
 
 def after_agent_callback(callback_context: CallbackContext) -> None:
+    """ADK callback: close the invocation's root run and any dangling children.
+
+    Args:
+        callback_context: ADK context for the agent invocation.
+
+    Returns:
+        None, so ADK keeps the agent's own output.
+    """
     if not _TRACING_ENABLED:
         return None
     try:
@@ -98,6 +187,15 @@ def after_agent_callback(callback_context: CallbackContext) -> None:
 
 
 def before_model_callback(callback_context, llm_request: LlmRequest):
+    """ADK callback: open an "llm" child run for a model call.
+
+    Args:
+        callback_context: ADK context for the agent invocation.
+        llm_request: The request about to be sent to the model.
+
+    Returns:
+        None, so ADK proceeds with the real model call.
+    """
     if not _TRACING_ENABLED:
         return None
     try:
@@ -124,6 +222,15 @@ def before_model_callback(callback_context, llm_request: LlmRequest):
 
 
 def after_model_callback(callback_context, llm_response: LlmResponse):
+    """ADK callback: close the most recent "llm" run with the model's output.
+
+    Args:
+        callback_context: ADK context for the agent invocation.
+        llm_response: The response returned by the model.
+
+    Returns:
+        None, so ADK keeps the model's own response.
+    """
     if not _TRACING_ENABLED:
         return None
     try:
@@ -140,6 +247,16 @@ def after_model_callback(callback_context, llm_response: LlmResponse):
 
 
 def before_tool_callback(tool: BaseTool, args: dict, tool_context) -> None:
+    """ADK callback: open a "tool" child run for a tool call.
+
+    Args:
+        tool: The tool being invoked.
+        args: Arguments the model passed to the tool.
+        tool_context: ADK context for the tool call.
+
+    Returns:
+        None, so ADK proceeds with the real tool call.
+    """
     if not _TRACING_ENABLED:
         return None
     try:
@@ -165,6 +282,17 @@ def before_tool_callback(tool: BaseTool, args: dict, tool_context) -> None:
 
 
 def after_tool_callback(tool: BaseTool, args: dict, tool_context, tool_response: dict) -> None:
+    """ADK callback: close the most recent "tool" run with the tool's result.
+
+    Args:
+        tool: The tool that was invoked.
+        args: Arguments the model passed to the tool.
+        tool_context: ADK context for the tool call.
+        tool_response: The tool's result.
+
+    Returns:
+        None, so ADK keeps the tool's own result.
+    """
     if not _TRACING_ENABLED:
         return None
     try:
