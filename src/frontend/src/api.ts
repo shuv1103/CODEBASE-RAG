@@ -1,4 +1,4 @@
-// Single point of contact with the FastAPI backend (see CLAUDE.md §15.3 for
+// Single point of contact with the FastAPI backend 
 // the verified request/response contract this mirrors).
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 

@@ -5,8 +5,13 @@ rag-implement/
 **/*.pyc
 **/*.pyo
 **/*.pyd
-src/data/
-.adk/
+src/backend/data/
+**/.adk/
+# Only src/backend/ and requirements.txt are copied into the image.
+src/frontend/
+tests/
+scripts/
+references/
 *.egg-info/
 .pytest_cache/
 .env

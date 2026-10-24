@@ -14,17 +14,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 
-COPY src/ ./src/
+COPY src/backend/ ./src/backend/
 
 # Run as an unprivileged user, not root. The code stays root-owned (read-only
-# for the app); only src/data/ — the one directory the app writes to, besides
-# /tmp for repo clones — belongs to the app user.
+# for the app); only src/backend/data/ — the one directory the app writes to,
+# besides /tmp for repo clones — belongs to the app user.
 RUN groupadd --system app \
     && useradd --system --gid app --create-home --home-dir /home/app app \
-    && mkdir -p /app/src/data/chunks \
-    && chown -R app:app /app/src/data
+    && mkdir -p /app/src/backend/data/chunks \
+    && chown -R app:app /app/src/backend/data
 
-WORKDIR /app/src
+# src/backend is the import root, so the start commands (uvicorn api.main:app,
+# celery -A worker.celery_app) are unchanged.
+WORKDIR /app/src/backend
 
 USER app
 

@@ -1,0 +1,11 @@
+# Local only (tests + evaluation); the production image installs requirements.txt alone.
+-r requirements.txt
+
+# Evaluation (src/backend/evaluation/)
+ragas==0.4.3
+datasets==5.0.1
+pandas==3.0.6
+
+# Test suite: pytest (config in pytest.ini)
+pytest==9.1.1
+pytest-asyncio==1.4.0

@@ -1,3 +1,5 @@
+name: codebase-rag
+
 services:
   # Vector store: there is no local Qdrant service. api and celery_worker
   # connect to the Qdrant Cloud cluster named by QDRANT_URL + QDRANT_API_KEY,
@@ -13,7 +15,7 @@ services:
 
   # FastAPI app: POST /api/repos, GET /api/repos/{id}, POST /api/repos/{id}/chat.
   # Enqueues ingestion onto Celery instead of running it inline — see
-  # src/api/dependencies.py (RagWorkflowFacade.enqueue_ingestion).
+  # src/backend/api/core/dependencies.py (RagWorkflowFacade.enqueue_ingestion).
   api:
     build: .
     image: codebase-rag-backend:latest
@@ -23,7 +25,7 @@ services:
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
 
-  # Celery worker(s): runs ingest_repo_task (src/worker/tasks.py) — the
+  # Celery worker(s): runs ingest_repo_task (src/backend/worker/tasks.py) — the
   # clone -> chunk -> embed -> store pipeline — off the API process, so a
   # slow/large ingestion never blocks other users' requests. Scale with
   # `docker-compose up --scale celery_worker=N` for more ingestion throughput.
@@ -31,7 +33,7 @@ services:
     build: .
     image: codebase-rag-backend:latest
     env_file: .env
-    command: celery -A worker.celery_app worker --pool=solo --without-gossip --without-mingle --loglevel=debug
+    command: celery -A worker.celery_app worker --pool=solo --without-gossip --without-mingle --loglevel=info
     restart: unless-stopped
 
   # React/TS SPA (src/frontend/), built and served by nginx. VITE_API_BASE_URL

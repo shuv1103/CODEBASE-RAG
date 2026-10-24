@@ -83,49 +83,28 @@ This is **retrieval-grounded generation** working as designed: no hallucination,
 
 ```text
 CODEBASE-RAG/
-├── Dockerfile
-├── docker-compose.yml
-├── req.txt
-├── README.md
-├── docs/
-│   └── image.png                        # ADK UI live test screenshot
+├── Dockerfile                          # Backend image (copies src/backend/ only)
+├── docker-compose.yml                  # api, celery_worker, frontend
+├── requirements.txt
+├── pytest.ini                          # pythonpath = src/backend scripts
+├── scripts/
+│   ├── chunk_main.py                   # CLI: chunk a local repo to JSONL
+│   └── embeddings_main.py              # CLI: embed a chunks file into Qdrant
+├── tests/                              # pytest suite (kept local)
 └── src/
-    ├── ingestion/
-    │   ├── repo_loader.py               # Directory traversal, FileDocument producer
-    │   └── language_detector.py         # Extension → language mapping
-    ├── chunking/
-    │   ├── chunk_models.py              # Pydantic models: CodeChunk, ChunkManifest
-    │   ├── chunker.py                   # ASTCodeChunker — astchunk integration
-    │   ├── chunk_persist.py             # JSONL + manifest persistence
-    │   └── chunk_main.py               # Pipeline entrypoint
-    ├── embeddings/
-    │   ├── embeddings_models.py         # Pydantic models: EmbeddingRecord, BatchStats
-    │   ├── embeddings_formatter.py      # Builds embedding-ready text from chunk + metadata
-    │   ├── embeddings_client.py         # Google embedding API wrapper
-    │   ├── qdrant_store.py             # Qdrant collection + tenant index, batch upsert
-    │   └── embeddings_main.py          # Pipeline entrypoint
-    ├── retrieval/
-    │   ├── retrieval_models.py          # Pydantic models: RetrievalResult, RetrievalResponse
-    │   ├── query_embedder.py            # Converts query text to embedding vector
-    │   ├── qdrant_retriever.py          # repo_id-filtered similarity search against Qdrant
-    │   └── retrieval_service.py         # Orchestrates query → retrieval → format
-    ├── codebase_rag_agent/
-    │   ├── tools.py                     # retrieve_code_context ADK tool definition
-    │   └── agent.py                     # LlmAgent setup, instruction, tool registration
-    ├── evaluation/
-    │   ├── loader.py                    # Loads and validates evaluation dataset
-    │   ├── ragas_eval.py                # RAGAS metric computation
-    │   ├── metrics.py                   # MetricsEvaluator — Recall@K, latency, cost
-    │   ├── run_eval.py                  # Evaluation entrypoint
-    │   └── dataset.json                 # Ground-truth Q&A pairs
-    ├── utils/
-    │   ├── config.py                    # Environment variable loading (Pydantic Settings)
-    │   ├── chunk_config.py              # Chunking tunable parameters
-    │   ├── model_config.py              # litellm_model_name() / build_llm_model() factory
-    │   └── file_utility.py             # Shared path and I/O helpers
-    └── data/chunks/
-        ├── code_chunks.jsonl            # Chunking output artifact
-        └── chunk_manifest.json          # Chunk run metadata and stats
+    ├── frontend/                       # React + Vite + TypeScript SPA
+    └── backend/                        # Python import root (FastAPI + Celery)
+        ├── api/                        # main.py, core/, routes/v1/, schemas/
+        ├── storage/                    # RepoStatus + Redis/in-memory status stores
+        ├── worker/                     # celery_app.py, tasks.py (ingest_repo_task)
+        ├── ingestion/                  # git_cloner, repo_loader, ingest_pipeline
+        ├── chunking/                   # ASTCodeChunker (chonkie), models, config
+        ├── embeddings/                 # OpenAI embeddings, Qdrant vector store
+        ├── retrieval/                  # query embedding + repo-scoped search
+        ├── caching/                    # LangCache answer cache, PII gate
+        ├── codebase_rag_agent/         # Google ADK agent, retrieval tool, tracing
+        ├── evaluation/                 # RAGAS + Recall@K/latency/cost, dataset.json
+        └── utils/                      # config, logging, rate_limiter, helpers
 ```
 
 ---
@@ -152,10 +131,10 @@ Run the three pipeline stages in order:
 
 ```bash
 # 1. Chunk your target codebase
-python -m src.chunking.chunk_main
+python scripts/chunk_main.py
 
 # 2. Embed chunks and index into Qdrant
-python -m src.embeddings.embeddings_main
+python scripts/embeddings_main.py
 
 # 3. Launch the ADK agent web server
 adk web --host 0.0.0.0 --port 8000
@@ -197,7 +176,7 @@ HOST_REPO_PATH=/absolute/path/to/target/repo
 
 # Embeddings
 EMBEDDING_MODEL=models/text-embedding-004
-CHUNKS_JSON_PATH=src/data/chunks/code_chunks.jsonl
+CHUNKS_JSON_PATH=src/backend/data/chunks/code_chunks.jsonl
 EMBEDDING_BATCH_SIZE=20
 
 # Retrieval
@@ -207,7 +186,7 @@ TOP_K=5
 AGENT_MODEL=your-llm(suggest - pick a smaller model)
 
 # Evaluation
-EVALUATION_DATASET_PATH=src/evaluation/dataset.json
+EVALUATION_DATASET_PATH=src/backend/evaluation/dataset.json
 EVALUATION_LLM_MODEL=your-llm(suggest - pick a larger model)
 ```
 
@@ -217,13 +196,13 @@ EVALUATION_LLM_MODEL=your-llm(suggest - pick a larger model)
 
 ### A) Ingest and chunk a codebase
 
-Set `repo_path` in `src/chunking/chunk_main.py` to your target repository, then:
+Set `repo_path` in `scripts/chunk_main.py` to your target repository, then:
 
 ```bash
-python -m src.chunking.chunk_main
+python scripts/chunk_main.py
 ```
 
-Output artifacts written to `src/data/chunks/`:
+Output artifacts written to `src/backend/data/chunks/`:
 
 ```
 code_chunks.jsonl       ← one JSON object per chunk (content + metadata)
@@ -233,7 +212,7 @@ chunk_manifest.json     ← run stats: files scanned, chunks produced, languages
 ### B) Embed and index
 
 ```bash
-python -m src.embeddings.embeddings_main
+python scripts/embeddings_main.py
 ```
 
 Reads `code_chunks.jsonl`, generates Google embeddings in configurable batches, and upserts into Qdrant. Idempotent — re-running updates existing vectors.
@@ -241,7 +220,7 @@ Reads `code_chunks.jsonl`, generates Google embeddings in configurable batches, 
 ### C) Retrieve programmatically
 
 ```python
-from src.retrieval.retrieval_service import RetrievalService
+from retrieval import RetrievalService  # run from src/backend/
 
 service = RetrievalService()
 context = service.retrieve_as_context(
@@ -254,7 +233,7 @@ print(context)
 ### D) Run evaluation
 
 ```bash
-python -m src.evaluation.run_eval
+python -m evaluation.run_eval
 ```
 
 Runs the RAGAS evaluation suite **plus** the Recall@K / latency / cost metrics (see [Metrics Evaluation](#metrics-evaluation)) against `dataset.json` and prints scores for both.
@@ -270,7 +249,7 @@ Runs the RAGAS evaluation suite **plus** the Recall@K / latency / cost metrics (
 - Produces typed `FileDocument` objects with language, path, and raw content.
 - Detects language from extension: Python, JS/TS, Java, C#, C/C++, Rust, Go, Dart, and more.
 
-**Core files:** `src/ingestion/repo_loader.py`, `src/ingestion/language_detector.py`, `src/utils/config.py`
+**Core files:** `src/backend/ingestion/repo_loader.py`, `src/backend/ingestion/language_detector.py`, `src/backend/utils/config.py`
 
 ---
 
@@ -302,7 +281,7 @@ Naive token-window splitting destroys code semantics — a function split at a r
 
 **Result:** retrieval returns chunks that are both self-contained (chunk size) and contextually connected (overlap) — meaningfully better than fixed-window splitting for code Q&A.
 
-**Core files:** `src/chunking/chunker.py`, `src/chunking/chunk_models.py`, `src/chunking/chunk_persist.py`, `src/utils/chunk_config.py`
+**Core files:** `src/backend/chunking/chunker.py`, `src/backend/chunking/chunk_models.py`, `src/backend/chunking/chunk_persist.py`, `src/backend/utils/chunk_config.py`
 
 
 
@@ -316,7 +295,7 @@ Naive token-window splitting destroys code semantics — a function split at a r
 - Upserts vectors and full metadata payloads into a persistent Qdrant collection (cosine distance, HNSW index), each point tagged with its `repo_id`.
 - Tracks batch-level operational counters for observability.
 
-**Core files:** `src/embeddings/embeddings_formatter.py`, `src/embeddings/embeddings_client.py`, `src/embeddings/qdrant_store.py`, `src/embeddings/embeddings_main.py`
+**Core files:** `src/backend/embeddings/embeddings_formatter.py`, `src/backend/embeddings/embeddings_client.py`, `src/backend/embeddings/qdrant_store.py`, `scripts/embeddings_main.py`
 
 ---
 
@@ -327,7 +306,7 @@ Naive token-window splitting destroys code semantics — a function split at a r
 - Normalizes raw Qdrant results into typed `RetrievalResult` / `RetrievalResponse` objects.
 - Formats retrieved chunks into structured, LLM-ready context blocks with file path and line attribution.
 
-**Core files:** `src/retrieval/query_embedder.py`, `src/retrieval/qdrant_retriever.py`, `src/retrieval/retrieval_service.py`, `src/retrieval/retrieval_models.py`
+**Core files:** `src/backend/retrieval/query_embedder.py`, `src/backend/retrieval/qdrant_retriever.py`, `src/backend/retrieval/retrieval_service.py`, `src/backend/retrieval/retrieval_models.py`
 
 ---
 
@@ -338,7 +317,7 @@ Naive token-window splitting destroys code semantics — a function split at a r
 - Agent system instruction enforces **retrieve-before-generate** behavior — the model cannot answer without first invoking the retrieval tool.
 - The ADK web UI provides Events and Traces panels for full tool-call transparency.
 
-**Core files:** `src/codebase_rag_agent/tools.py`, `src/codebase_rag_agent/agent.py`
+**Core files:** `src/backend/codebase_rag_agent/tools.py`, `src/backend/codebase_rag_agent/agent.py`
 
 ---
 
@@ -355,15 +334,15 @@ Evaluation is built in from the start rather than bolted on later.
 | Context precision | Are the retrieved chunks actually relevant to the question? |
 | Context recall | Does the retrieved context cover the ground-truth answer? |
 
-Add ground-truth Q&A pairs to `src/evaluation/dataset.json` and run `python -m src.evaluation.run_eval` to score the pipeline end-to-end.
+Add ground-truth Q&A pairs to `src/backend/evaluation/dataset.json` and run `python -m evaluation.run_eval` to score the pipeline end-to-end.
 
-**Core files:** `src/evaluation/loader.py`, `src/evaluation/ragas_eval.py`, `src/evaluation/run_eval.py`
+**Core files:** `src/backend/evaluation/loader.py`, `src/backend/evaluation/ragas_eval.py`, `src/backend/evaluation/run_eval.py`
 
 ---
 
 ## Metrics Evaluation
 
-Beyond RAGAS correctness scores, the pipeline is benchmarked for retrieval quality, latency, and inference cost — computed by `MetricsEvaluator` (`src/evaluation/metrics.py`) and run via `python -m src.evaluation.run_eval`.
+Beyond RAGAS correctness scores, the pipeline is benchmarked for retrieval quality, latency, and inference cost — computed by `MetricsEvaluator` (`src/backend/evaluation/metrics.py`) and run via `python -m evaluation.run_eval`.
 
 **RAG Optimization** — reduced retrieved-context size (`TOP_K` 5 → 3):
 
@@ -387,7 +366,7 @@ Beyond RAGAS correctness scores, the pipeline is benchmarked for retrieval quali
 | 5 | 0.822 |
 | 10 | 0.978 |
 
-**Core files:** `src/evaluation/metrics.py`, `src/evaluation/ragas_eval.py`, `src/evaluation/run_eval.py`
+**Core files:** `src/backend/evaluation/metrics.py`, `src/backend/evaluation/ragas_eval.py`, `src/backend/evaluation/run_eval.py`
 
 ---
 

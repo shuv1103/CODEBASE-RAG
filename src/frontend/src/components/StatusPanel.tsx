@@ -38,7 +38,10 @@ export default function StatusPanel({ repoId, url, onReady, onReset }: StatusPan
           timer = setTimeout(tick, POLL_MS);
         }
       } catch (err) {
-        if (!cancelled) setError(getErrorMessage(err));
+        if (cancelled) return;
+        setError(getErrorMessage(err));
+        // Keep polling: one failed check (network blip, 503) must not freeze the panel.
+        timer = setTimeout(tick, POLL_MS);
       }
     }
 
