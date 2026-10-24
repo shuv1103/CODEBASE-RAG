@@ -44,8 +44,8 @@ Ask *"Where is JWT authentication implemented?"* and get back the exact files, c
 ## System Architecture Diagram
 
 
+<img width="3440" height="1920" alt="image" src="https://github.com/user-attachments/assets/eb17abe5-4a28-4f78-893d-f00e6c0baced" />
 
-<img width="1343" height="881" alt="image" src="https://github.com/user-attachments/assets/1a08ab80-5c50-4034-bd04-5926bd8590fd" />
 
 ---
 
