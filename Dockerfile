@@ -36,4 +36,6 @@ USER app
 # with the grammars baked in instead of stalling its first ingestion.
 RUN python -c "import tree_sitter_language_pack as t; t.download_all()"
 
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default: API + worker in one container (Render free plan, Docker Command left
+# empty). docker-compose overrides this per service; Render sets PORT.
+CMD celery -A worker.celery_app worker --pool=solo --without-gossip --without-mingle --loglevel=info & exec uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}
