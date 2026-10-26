@@ -56,13 +56,14 @@ class SemanticCacheRepository(ABC):
 
     @abstractmethod
     def lookup(
-        self, repo_id: str, normalized_query: str
+        self, repo_id: str, normalized_query: str, semantic: bool = True
     ) -> SemanticLookupResult:
         """Find a cached answer for a query, exact match first. Never raises.
 
         Args:
             repo_id: Repository the cache is scoped to.
             normalized_query: Query already passed through normalize_query.
+            semantic: False restricts the search to exact matches.
 
         Returns:
             SemanticLookupResult — see its docstring.
@@ -176,13 +177,14 @@ class LangCacheRepository(SemanticCacheRepository):
             )
 
     def lookup(
-        self, repo_id: str, normalized_query: str
+        self, repo_id: str, normalized_query: str, semantic: bool = True
     ) -> SemanticLookupResult:
         """Search this repo's cached answers, preferring an exact match.
 
         Args:
             repo_id: Repository the cache is scoped to.
             normalized_query: Query already passed through normalize_query.
+            semantic: False restricts the search to exact matches.
 
         Returns:
             SemanticLookupResult with the best hit, or a miss when nothing
@@ -193,10 +195,11 @@ class LangCacheRepository(SemanticCacheRepository):
         try:
             response = self._client.search(
                 prompt=normalized_query,
-                search_strategies=[
-                    SearchStrategy.EXACT,
-                    SearchStrategy.SEMANTIC,
-                ],
+                search_strategies=(
+                    [SearchStrategy.EXACT, SearchStrategy.SEMANTIC]
+                    if semantic
+                    else [SearchStrategy.EXACT]
+                ),
                 similarity_threshold=self._similarity_threshold,
                 attributes={_REPO_ATTRIBUTE: repo_id},
                 max_results=_MAX_RESULTS,

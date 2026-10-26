@@ -57,7 +57,9 @@ class SemanticCacheService:
         """Look up a message; an exact match wins over a semantic one.
 
         A follow-up (previous_question set) is searched only among other
-        follow-ups (see cache_scope), with the same similarity threshold.
+        follow-ups (see cache_scope), and only for an exact match: its key
+        is mostly the previous question, so a semantic search would match
+        any follow-up to a similar first question.
 
         Args:
             repo_id: Repository the lookup is scoped to.
@@ -76,7 +78,9 @@ class SemanticCacheService:
             )
             return CacheLookupResult(answer=None, outcome="blocked")
 
-        result = self._repository.lookup(scope, normalize_query(key))
+        result = self._repository.lookup(
+            scope, normalize_query(key), semantic=scope == repo_id
+        )
         if result.hit is not None and result.hit.strategy == "exact":
             logger.info(
                 "Exact cache hit",
@@ -145,8 +149,8 @@ class SemanticCacheService:
     ) -> tuple[str, str]:
         """Return the (scope, key) a turn is cached under.
 
-        A first turn is keyed by the question in the repo's scope. A
-        follow-up's answer can depend on the conversation, so it is keyed by
+        A first turn, or a question repeated verbatim, is keyed by the
+        question in the repo's scope. A follow-up's answer can depend on the conversation, so it is keyed by
         the previous question plus the message, in a separate follow-up
         scope: first-turn lookups never see follow-up answers.
 
@@ -158,7 +162,10 @@ class SemanticCacheService:
         Returns:
             (scope, key): the repository scope and the text to cache under.
         """
-        if previous_question is None:
+        # casefold: LangCache's exact match ignores case too.
+        if previous_question is None or normalize_query(
+            previous_question
+        ).casefold() == normalize_query(message).casefold():
             return repo_id, message
         return f"{repo_id}{FOLLOW_UP_SCOPE_SUFFIX}", f"{previous_question}\n{message}"
 
