@@ -74,7 +74,7 @@ class SemanticCacheService:
         if self.is_blocked(repo_id, key):
             logger.info(
                 "Semantic cache bypassed (PII detected)",
-                extra={"cache_event": "blocked", "repo_id": repo_id},
+                extra={"cache_event": "blocked", "repo_id": repo_id, "scope": scope},
             )
             return CacheLookupResult(answer=None, outcome="blocked")
 
@@ -84,7 +84,7 @@ class SemanticCacheService:
         if result.hit is not None and result.hit.strategy == "exact":
             logger.info(
                 "Exact cache hit",
-                extra={"cache_event": "exact_hit", "repo_id": repo_id},
+                extra={"cache_event": "exact_hit", "repo_id": repo_id, "scope": scope},
             )
             return CacheLookupResult(
                 answer=result.hit.response,
@@ -97,6 +97,7 @@ class SemanticCacheService:
                 extra={
                     "cache_event": "semantic_hit",
                     "repo_id": repo_id,
+                    "scope": scope,
                     "nearest_similarity": result.nearest_similarity,
                 },
             )
@@ -111,6 +112,7 @@ class SemanticCacheService:
             extra={
                 "cache_event": "miss",
                 "repo_id": repo_id,
+                "scope": scope,
                 "nearest_similarity": result.nearest_similarity,
             },
         )
@@ -149,8 +151,8 @@ class SemanticCacheService:
     ) -> tuple[str, str]:
         """Return the (scope, key) a turn is cached under.
 
-        A first turn, or a question repeated verbatim, is keyed by the
-        question in the repo's scope. A follow-up's answer can depend on the conversation, so it is keyed by
+        A first turn is keyed by the question in the repo's scope. A
+        follow-up's answer can depend on the conversation, so it is keyed by
         the previous question plus the message, in a separate follow-up
         scope: first-turn lookups never see follow-up answers.
 
@@ -162,10 +164,7 @@ class SemanticCacheService:
         Returns:
             (scope, key): the repository scope and the text to cache under.
         """
-        # casefold: LangCache's exact match ignores case too.
-        if previous_question is None or normalize_query(
-            previous_question
-        ).casefold() == normalize_query(message).casefold():
+        if previous_question is None:
             return repo_id, message
         return f"{repo_id}{FOLLOW_UP_SCOPE_SUFFIX}", f"{previous_question}\n{message}"
 

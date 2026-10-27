@@ -29,7 +29,7 @@ export interface RepoStatusResponse {
 export interface ChatResponse {
   session_id: string;
   answer: string;
-  cached: boolean;
+  cache_hit: "exact" | "semantic" | null;
 }
 
 export class ApiError extends Error {

@@ -1,10 +1,14 @@
 """Retrieval service: embed a query, search, and format context."""
 
+import logging
+
 from utils.config import settings
 
 from .qdrant_retriever import QdrantRetriever
 from .query_embedder import QueryEmbedder
 from .retrieval_models import RetrievalResponse, RetrievedChunk
+
+logger = logging.getLogger(__name__)
 
 
 class RetrievalService:
@@ -47,11 +51,22 @@ class RetrievalService:
 
         final_top_k = top_k if top_k is not None else settings.top_k
 
-        return self._retriever.search(
+        response = self._retriever.search(
             query=query,
             query_embedding=self._query_embedder.embed_query(query),
             top_k=final_top_k,
         )
+        logger.debug(
+            "Retrieved %d chunks",
+            len(response.results),
+            extra={
+                "top_chunks": [
+                    f"{chunk.relative_path}:{chunk.start_line} ({chunk.similarity_score})"
+                    for chunk in response.results
+                ]
+            },
+        )
+        return response
 
     def retrieve_as_context(self, query: str, top_k: int | None = None) -> str:
         """Retrieve relevant chunks and format them as grounded LLM context.

@@ -14,6 +14,7 @@ from google.adk.runners import InMemoryRunner
 from google.adk.sessions import Session
 from google.genai import types
 
+from caching.query_normalizer import normalize_query
 from caching.semantic_cache_repository import LangCacheRepository
 from caching.semantic_cache_service import SemanticCacheService
 from codebase_rag_agent.agent import build_agent
@@ -349,7 +350,7 @@ class RagWorkflowFacade:
 
     async def chat(
         self, repo_id: str, message: str, session_id: str | None
-    ) -> tuple[str, str, bool]:
+    ) -> tuple[str, str, str | None]:
         """Answer a question about a ready repo, consulting the cache first.
 
         On a hit, append the cached turn to the session so later turns see
@@ -363,7 +364,8 @@ class RagWorkflowFacade:
                 one (an unknown id also creates a new session).
 
         Returns:
-            (session_id, answer, cached).
+            (session_id, answer, cache_hit): cache_hit is "exact" or
+            "semantic" when the cache answered, None when the agent did.
 
         Raises:
             RepoNotFoundError: If the repo_id is unknown.
@@ -399,8 +401,11 @@ class RagWorkflowFacade:
 
         # The cache is shared by all users, and a follow-up's answer can
         # depend on the conversation; the cache service keys a follow-up by
-        # this previous question too, apart from first-turn entries.
+        # this previous question too, apart from first-turn entries. Earlier
+        # asks of this same question are skipped, so a repeat looks up the
+        # key its first ask was stored under.
         # ponytail: one turn of context; key on more turns if answers drift.
+        same_question = normalize_query(message).casefold()
         previous_question = next(
             (
                 event.content.parts[0].text
@@ -409,9 +414,12 @@ class RagWorkflowFacade:
                 and event.content
                 and event.content.parts
                 and event.content.parts[0].text
+                and normalize_query(event.content.parts[0].text).casefold()
+                != same_question
             ),
             None,
         )
+        turn = "first" if previous_question is None else "followup"
 
         # Cache calls are sync network I/O; keep them off the event loop.
         cache_result = await asyncio.to_thread(
@@ -431,7 +439,15 @@ class RagWorkflowFacade:
             await self.append_cached_turn_to_session(
                 runner, session, message, cache_result.answer
             )
-            return session.id, cache_result.answer, True
+            logger.info(
+                "Chat turn served from cache",
+                extra={"repo_id": repo_id, "turn": turn, "outcome": cache_result.outcome},
+            )
+            return (
+                session.id,
+                cache_result.answer,
+                cache_result.outcome.removesuffix("_hit"),
+            )
 
         # Only cache misses reach the LLM, so only they take a concurrency slot.
         answer = ""
@@ -464,8 +480,12 @@ class RagWorkflowFacade:
             answer,
             previous_question,
         )
+        logger.info(
+            "Chat turn answered by agent",
+            extra={"repo_id": repo_id, "turn": turn, "outcome": cache_result.outcome},
+        )
 
-        return session.id, answer, False
+        return session.id, answer, None
 
     async def append_cached_turn_to_session(
         self,

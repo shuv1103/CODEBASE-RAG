@@ -1,5 +1,7 @@
 """Request and response models for the v1 API."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from storage.status_store import PublicRepoStatus
@@ -98,9 +100,10 @@ class ChatResponse(BaseModel):
     Attributes:
         session_id: ADK session id to send back on the next turn.
         answer: The agent's (or cache's) answer text.
-        cached: True if the answer was served from the cache.
+        cache_hit: "exact" or "semantic" when the cache answered, None when
+            the agent did.
     """
 
     session_id: str
     answer: str
-    cached: bool
+    cache_hit: Literal["exact", "semantic"] | None

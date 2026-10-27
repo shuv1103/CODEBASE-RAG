@@ -112,14 +112,15 @@ async def chat(
         workflow: Injected workflow facade.
 
     Returns:
-        The answer, the session id to reuse, and whether it was cached.
+        The answer, the session id to reuse, and which cache tier (if any)
+        answered.
 
     Raises:
         RepoNotFoundError: If the repo_id is unknown.
         RepoNotReadyError: If the repo is not "ready".
         AgentResponseError: If the agent produced no final answer.
     """
-    session_id, answer, cached = await workflow.chat(
+    session_id, answer, cache_hit = await workflow.chat(
         repo_id, payload.message, payload.session_id
     )
-    return ChatResponse(session_id=session_id, answer=answer, cached=cached)
+    return ChatResponse(session_id=session_id, answer=answer, cache_hit=cache_hit)

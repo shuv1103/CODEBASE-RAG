@@ -10,7 +10,7 @@ interface ChatPanelProps {
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
-  cached?: boolean;
+  cacheHit?: "exact" | "semantic" | null;
 }
 
 function ExpandIcon({ expanded }: { expanded: boolean }) {
@@ -98,7 +98,7 @@ export default function ChatPanel({ repoId, url, onReset }: ChatPanelProps) {
       setSessionId(res.session_id);
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: res.answer, cached: res.cached },
+        { role: "assistant", content: res.answer, cacheHit: res.cache_hit },
       ]);
     } catch (err) {
       setError(getErrorMessage(err));
@@ -142,7 +142,7 @@ export default function ChatPanel({ repoId, url, onReset }: ChatPanelProps) {
           )}
           {messages.map((m, i) => (
             <div key={i} className={`bubble bubble-${m.role}`}>
-              {m.cached && <span className="bubble-cached-badge">cached</span>}
+              {m.cacheHit && <span className="bubble-cached-badge">{m.cacheHit} cache answer</span>}
               {m.content}
             </div>
           ))}
