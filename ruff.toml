@@ -1,0 +1,27 @@
+# Lint + format config for the backend: `ruff check` and `ruff format`
+# from the repo root.
+target-version = "py311"
+line-length = 79
+src = ["src/backend"]
+include = ["src/backend/**/*.py"]
+
+[lint]
+select = [
+    "E", "W", "F", "I", "N", "B", "UP", "SIM", "C90", "ANN", "D", "BLE",
+    "T20", "PL", "RET", "PTH", "ERA", "RUF",
+]
+ignore = [
+    "E501",     # the formatter wraps code; long strings/URLs stay readable
+    "D107",     # Google style documents __init__ args in the class docstring
+    "D413",     # no blank line required after the last docstring section
+    "ANN401",   # Any is allowed where a value really is untyped (wrappers)
+    "PLC0415",  # lazy imports keep heavy/networked modules off import time
+    "PLR2004",  # magic-number check is noisy for limits and status codes
+]
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.per-file-ignores]
+# The warnings filter must run before instructor (via ragas) is imported.
+"src/backend/evaluation/ragas_eval.py" = ["E402"]

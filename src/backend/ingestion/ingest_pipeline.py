@@ -5,11 +5,12 @@ import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Unpack
 
 from chunking.chunker import ASTCodeChunker
 from embeddings.embeddings_client import EmbeddingService, embed_chunks
 from embeddings.qdrant_store import QdrantVectorStore
+from storage.status_store import StatusFields
 from utils.config import settings
 from utils.iter_utils import batchify
 from utils.rate_limiter import ExponentialBackoff
@@ -19,7 +20,7 @@ from .repo_loader import RepoLoader
 
 logger = logging.getLogger(__name__)
 
-ProgressCallback = Callable[[dict[str, Any]], None] | None
+ProgressCallback = Callable[[StatusFields], None] | None
 # report(status, **fields): the stage-facing wrapper around ProgressCallback.
 Reporter = Callable[..., None]
 
@@ -192,9 +193,9 @@ def ingest_repo(
     started_at = time.monotonic()
     local_path: Path | None = None
 
-    def report(status: str, **fields: Any) -> None:
+    def report(status: str, **fields: Unpack[StatusFields]) -> None:
         if on_progress:
-            on_progress({"status": status, **fields})
+            on_progress(StatusFields(status=status, **fields))
 
     def check_timeout() -> None:
         if time.monotonic() - started_at > timeout_seconds:

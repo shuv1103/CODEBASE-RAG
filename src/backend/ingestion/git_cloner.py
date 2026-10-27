@@ -211,13 +211,22 @@ def run_clone(url: str, dest: Path) -> None:
         result = subprocess.run(
             [
                 "git",
-                "-c", "credential.helper=",
-                "-c", "core.symlinks=false",
-                "clone", "--depth", "1", "--single-branch", "--no-tags",
-                "--", url, str(dest),
+                "-c",
+                "credential.helper=",
+                "-c",
+                "core.symlinks=false",
+                "clone",
+                "--depth",
+                "1",
+                "--single-branch",
+                "--no-tags",
+                "--",
+                url,
+                str(dest),
             ],
             capture_output=True,
             text=True,
+            check=False,  # returncode is turned into GitCloneError below
             timeout=settings.clone_timeout_seconds,
             env=git_env(),
         )

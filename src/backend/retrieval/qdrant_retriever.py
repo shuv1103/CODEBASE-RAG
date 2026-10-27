@@ -1,5 +1,6 @@
 """Repo-scoped similarity search over the Qdrant collection."""
 
+import logging
 from pathlib import PurePath
 
 from qdrant_client import models
@@ -9,6 +10,8 @@ from embeddings.qdrant_store import get_qdrant_client, repo_filter
 from utils.config import settings
 
 from .retrieval_models import RetrievalResponse, RetrievedChunk
+
+logger = logging.getLogger(__name__)
 
 
 class QdrantRetriever:
@@ -67,6 +70,10 @@ class QdrantRetriever:
             )
         except UnexpectedResponse as exc:
             if exc.status_code == 404:
+                logger.warning(
+                    "Qdrant collection %s not found; returning no results",
+                    self._collection_name,
+                )
                 return RetrievalResponse(query=query, top_k=top_k, results=[])
             raise
 

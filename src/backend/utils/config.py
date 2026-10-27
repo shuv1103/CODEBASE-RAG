@@ -185,7 +185,10 @@ class Settings(BaseSettings):
     ingestion_timeout_seconds: PositiveInt = 900
 
     # --- API ---
-    api_cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:5173", ""]
+    api_cors_origins: Annotated[list[str], NoDecode] = [
+        "http://localhost:5173",
+        "",
+    ]
     api_host: str = "0.0.0.0"
     api_port: int = Field(default=8000, ge=1, le=65535)
     # Serves /docs, /redoc and /openapi.json.

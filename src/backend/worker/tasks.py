@@ -1,7 +1,8 @@
 """Celery ingestion task and its crash handler."""
 
+import functools
 import logging
-from typing import Any
+from typing import Any, Unpack
 
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import task_failure
@@ -9,7 +10,7 @@ from celery.signals import task_failure
 from ingestion.git_cloner import GitCloneError, RepoTooLargeError
 from ingestion.ingest_pipeline import IngestionError, ingest_repo
 from storage.redis_status_store import RedisStatusStore
-from storage.status_store import IN_FLIGHT_STATUSES
+from storage.status_store import IN_FLIGHT_STATUSES, StatusFields
 from utils.time_utils import utc_now_iso
 
 from .celery_app import celery_app
@@ -26,24 +27,20 @@ _WORKER_CRASHED_ERROR = (
     "Ingestion worker crashed. Submit the repository again to retry."
 )
 
+
 # One store, and so one bounded connection pool, per worker process. Built
 # on first use because the API imports this module only to enqueue tasks.
-_status_store: RedisStatusStore | None = None
-
-
+@functools.cache
 def get_status_store() -> RedisStatusStore:
     """Return this process's shared RedisStatusStore, building it on first call.
 
     Returns:
-        The module-level RedisStatusStore.
+        The process-wide RedisStatusStore.
     """
-    global _status_store
-    if _status_store is None:
-        _status_store = RedisStatusStore()
-    return _status_store
+    return RedisStatusStore()
 
 
-class _AttemptSuperseded(Exception):
+class AttemptSupersededError(Exception):
     """Raised when the record now belongs to a newer ingestion attempt."""
 
 
@@ -51,7 +48,7 @@ def write_status(
     store: RedisStatusStore,
     repo_id: str,
     attempt_id: str | None,
-    **fields: Any,
+    **fields: Unpack[StatusFields],
 ) -> bool:
     """Write status fields, but only while the record is still this attempt's.
 
@@ -78,7 +75,9 @@ def public_error(exc: Exception) -> str:
         The exception's own message for user-facing failures, otherwise a
         generic message (the details are only logged).
     """
-    return str(exc) if isinstance(exc, _USER_FACING_ERRORS) else _INTERNAL_ERROR
+    return (
+        str(exc) if isinstance(exc, _USER_FACING_ERRORS) else _INTERNAL_ERROR
+    )
 
 
 @celery_app.task(name="worker.tasks.ingest_repo_task")
@@ -118,11 +117,14 @@ def ingest_repo_task(
             repo_id,
         )
         return
+    logger.info(
+        "Ingestion started for repo_id=%s attempt_id=%s", repo_id, attempt_id
+    )
 
-    def on_progress(fields: dict[str, Any]) -> None:
+    def on_progress(fields: StatusFields) -> None:
         """Write a progress update; stop the run once it is superseded."""
         if not write_status(status_store, repo_id, attempt_id, **fields):
-            raise _AttemptSuperseded(repo_id)
+            raise AttemptSupersededError(repo_id)
 
     try:
         ingest_repo(source_url, repo_id, on_progress=on_progress)
@@ -134,7 +136,7 @@ def ingest_repo_task(
             ready_at=utc_now_iso(),
             error=None,
         )
-    except _AttemptSuperseded:
+    except AttemptSupersededError:
         logger.info(
             "Stopped ingest_repo_task for repo_id=%s: superseded by a newer "
             "attempt",

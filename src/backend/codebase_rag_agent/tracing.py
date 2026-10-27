@@ -4,7 +4,7 @@ import contextlib
 import functools
 import itertools
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, TypedDict
 
 import langsmith
 from google.adk.agents.callback_context import CallbackContext
@@ -24,10 +24,24 @@ _client: langsmith.Client | None = (
     langsmith.Client() if _TRACING_ENABLED else None
 )
 
-# Open runs per ADK invocation, so "after" callbacks can close what "before"
-# callbacks opened: invocation_id ->
-# {"agent": RunTree, "model_stack": [...], "tool_stack": [...]}
-_runs: dict[str, dict[str, Any]] = {}
+
+class InvocationRuns(TypedDict, total=False):
+    """The open LangSmith runs of one ADK invocation.
+
+    Attributes:
+        agent: The invocation's agent run, once before_agent_callback ran.
+        model_stack: Model runs opened and not yet closed, innermost last.
+        tool_stack: Tool runs opened and not yet closed, innermost last.
+    """
+
+    agent: RunTree | None
+    model_stack: list[RunTree]
+    tool_stack: list[RunTree]
+
+
+# Open runs per ADK invocation id, so "after" callbacks can close what
+# "before" callbacks opened.
+_runs: dict[str, InvocationRuns] = {}
 # ADK skips after_agent_callback when a run raises or is cancelled, so cap the
 # open invocations; past the cap the oldest is closed and forgotten.
 _MAX_OPEN_INVOCATIONS = 256
@@ -35,7 +49,7 @@ _ABANDONED_RUN_ERROR = "invocation ended without after_agent_callback"
 
 
 def close_runs(
-    state: dict[str, Any], child_error: str, agent_error: str | None = None
+    state: InvocationRuns, child_error: str, agent_error: str | None = None
 ) -> None:
     """End an invocation's open model/tool runs and its agent run.
 
@@ -58,7 +72,7 @@ def close_runs(
         agent_run.patch()
 
 
-def invocation_state(invocation_id: str) -> dict[str, Any]:
+def invocation_state(invocation_id: str) -> InvocationRuns:
     """Return an invocation's entry in _runs, creating it if needed.
 
     Creating the entry keeps runs opened for an unknown invocation
@@ -207,7 +221,7 @@ def extract_llm_output(llm_response: LlmResponse) -> str:
 
 
 def start_run(
-    state: dict[str, Any], name: str, run_type: str, inputs: dict[str, Any]
+    state: InvocationRuns, name: str, run_type: str, inputs: dict[str, Any]
 ) -> RunTree:
     """Post a new run: a child of the invocation's agent run, else a root run.
 

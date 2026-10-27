@@ -115,7 +115,9 @@ def retry_after_seconds(request: Request, exc: RateLimitExceeded) -> int:
             limit_item, *keys
         )
         return max(1, int(reset_at - time.time()))
-    except Exception:
+    # The limiter's storage (memory or Redis) can fail in many ways; the
+    # whole window is a safe, slightly pessimistic Retry-After.
+    except Exception:  # noqa: BLE001
         return exc.limit.limit.get_expiry()
 
 
@@ -132,6 +134,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     Args:
         app: The FastAPI application to register handlers on.
     """
+
     async def client_error(request: Request, exc: Exception) -> JSONResponse:
         # Starlette also routes subclasses here, so walk the MRO.
         status_code = next(
@@ -151,7 +154,9 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request, exc: RateLimitExceeded
     ) -> JSONResponse:
         # The frontend shows "detail", so every error uses that shape.
-        detail = f"Too many requests: limit is {exc.detail}. Try again shortly."
+        detail = (
+            f"Too many requests: limit is {exc.detail}. Try again shortly."
+        )
         return JSONResponse(
             status_code=429,
             content={"detail": detail},
@@ -189,8 +194,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=503,
             content={
                 "detail": (
-                    "Service temporarily unavailable. "
-                    "Please retry shortly."
+                    "Service temporarily unavailable. Please retry shortly."
                 )
             },
             headers={
@@ -202,7 +206,9 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def agent_error(
         request: Request, exc: AgentResponseError
     ) -> JSONResponse:
-        logger.exception("Agent failed to produce a response")
+        logger.exception(
+            "Agent failed to produce a response in %s", request.url.path
+        )
         return JSONResponse(status_code=502, content={"detail": str(exc)})
 
     @app.exception_handler(Exception)

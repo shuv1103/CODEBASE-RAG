@@ -1,6 +1,6 @@
 """Time helpers."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def utc_now_iso() -> str:
@@ -9,4 +9,4 @@ def utc_now_iso() -> str:
     Returns:
         Timezone-aware ISO timestamp, e.g. "2026-07-17T10:02:11.123456+00:00".
     """
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

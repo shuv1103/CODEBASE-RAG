@@ -5,6 +5,7 @@ import logging
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from billiard.exceptions import WorkerLostError
@@ -14,17 +15,17 @@ from ingestion.repo_loader import FileDocument, IngestionResult
 from utils.iter_utils import batchify
 
 from .chunk_config import (
-    AST_SUPPORTED_LANGUAGES,
     AST_LANGUAGE_ALIASES,
+    AST_SUPPORTED_LANGUAGES,
+    DEFAULT_CHUNK_BATCH_SIZE,
     DEFAULT_CODE_CHUNK_SIZE,
     DEFAULT_CODE_CHUNK_TOKENIZER,
-    DEFAULT_CHUNK_BATCH_SIZE,
 )
 from .chunk_models import (
-    CodeChunk,
-    ChunkMetadata,
     ChunkingResult,
     ChunkingStats,
+    ChunkMetadata,
+    CodeChunk,
 )
 
 if TYPE_CHECKING:
@@ -38,6 +39,25 @@ _POOL_POLL_INTERVAL_SECONDS = 0.05
 # One chunk as pickled back from the worker subprocess:
 # {"text", "start_byte", "end_byte", "token_count"}.
 RawChunk = dict[str, Any]
+
+
+@dataclass
+class ChunkRun:
+    """State shared by every batch of one ASTCodeChunker.chunk() call.
+
+    Attributes:
+        repo_id: Repository id to stamp on each chunk.
+        source_url: Repository URL to stamp on each chunk.
+        stats: Run stats, updated in place.
+        pool: Single-worker pool; replaced when its worker crashes or hangs.
+        chunks: Every chunk produced so far.
+    """
+
+    repo_id: str
+    source_url: str
+    stats: ChunkingStats
+    pool: Pool
+    chunks: list[CodeChunk] = field(default_factory=list)
 
 
 @functools.cache
@@ -278,22 +298,24 @@ class ASTCodeChunker:
             for idx, raw in enumerate(raw_chunks)
         ]
 
+    def replace_pool(self, run: ChunkRun) -> None:
+        """Swap the run's pool for a fresh one after its worker crashed or hung.
+
+        Args:
+            run: The current chunking run.
+        """
+        run.pool.terminate()
+        run.pool = self.new_pool()
+
     def chunk_single_document(
-        self,
-        document: FileDocument,
-        normalized_language: str,
-        repo_id: str,
-        source_url: str,
-        pool: Pool,
+        self, document: FileDocument, normalized_language: str, run: ChunkRun
     ) -> list[CodeChunk]:
-        """Chunk one document in the pool's worker subprocess.
+        """Chunk one document in the run pool's worker subprocess.
 
         Args:
             document: The file to chunk.
             normalized_language: Normalized language of the file.
-            repo_id: Repository id to stamp on each chunk.
-            source_url: Repository URL to stamp on each chunk.
-            pool: Single-worker pool to run the job in.
+            run: The current chunking run.
 
         Returns:
             The file's chunks.
@@ -302,7 +324,7 @@ class ASTCodeChunker:
             WorkerLostError: If the worker process died.
             TimeoutError: If chunking exceeded PER_FILE_TIMEOUT_SECONDS.
         """
-        async_result = pool.apply_async(
+        async_result = run.pool.apply_async(
             chunkify_in_subprocess,
             args=(
                 document.content,
@@ -312,98 +334,99 @@ class ASTCodeChunker:
             ),
         )
         raw_chunks = get_result_fast(
-            pool, async_result, PER_FILE_TIMEOUT_SECONDS
+            run.pool, async_result, PER_FILE_TIMEOUT_SECONDS
         )
         return self.build_code_chunks(
-            document, raw_chunks, repo_id, source_url
+            document, raw_chunks, run.repo_id, run.source_url
         )
 
     def record_file_result(
         self,
         document: FileDocument,
         file_chunks: list[CodeChunk],
-        stats: ChunkingStats,
-        all_chunks: list[CodeChunk],
+        run: ChunkRun,
     ) -> None:
-        """Add a file's chunks to the running totals, if it produced any.
+        """Add a file's chunks to the run's totals, if it produced any.
 
         Args:
             document: The file that was chunked.
             file_chunks: Chunks produced for the file.
-            stats: Stats object to update in place.
-            all_chunks: Accumulator list, extended in place.
+            run: The current chunking run.
         """
-        if file_chunks:
-            stats.total_documents_chunked += 1
-            stats.total_chunks_created += len(file_chunks)
-            all_chunks.extend(file_chunks)
-            logger.debug(
-                "Chunked %s: %d chunks (total so far: %d)",
-                document.relative_path,
-                len(file_chunks),
-                stats.total_chunks_created,
-            )
+        if not file_chunks:
+            return
+        run.stats.total_documents_chunked += 1
+        run.stats.total_chunks_created += len(file_chunks)
+        run.chunks.extend(file_chunks)
+        logger.debug(
+            "Chunked %s: %d chunks (total so far: %d)",
+            document.relative_path,
+            len(file_chunks),
+            run.stats.total_chunks_created,
+        )
 
     def chunk_one_with_recovery(
-        self,
-        document: FileDocument,
-        normalized_language: str,
-        repo_id: str,
-        source_url: str,
-        pool: Pool,
-        stats: ChunkingStats,
-        all_chunks: list[CodeChunk],
-    ) -> Pool:
+        self, document: FileDocument, normalized_language: str, run: ChunkRun
+    ) -> None:
         """Chunk one file, recovering from crashes, hangs, and errors.
 
-        Count failures in stats.failed_files instead of raising them.
+        Count failures in run.stats.failed_files instead of raising them.
 
         Args:
             document: The file to chunk.
             normalized_language: Normalized language of the file.
-            repo_id: Repository id to stamp on each chunk.
-            source_url: Repository URL to stamp on each chunk.
-            pool: Single-worker pool to run the job in.
-            stats: Stats object to update in place.
-            all_chunks: Accumulator list, extended in place.
-
-        Returns:
-            The pool to keep using — a fresh one if the worker crashed or
-            hung.
+            run: The current chunking run; its pool is replaced if the
+                worker crashed or hung.
         """
         try:
             file_chunks = self.chunk_single_document(
-                document, normalized_language, repo_id, source_url, pool
+                document, normalized_language, run
             )
-            self.record_file_result(document, file_chunks, stats, all_chunks)
-
         except (WorkerLostError, TimeoutError) as exc:
-            stats.failed_files += 1
+            run.stats.failed_files += 1
             logger.warning(
                 "Chunking crashed/hung on %s: %s", document.relative_path, exc
             )
-            pool.terminate()
-            pool = self.new_pool()
-
-        except Exception as exc:
-            stats.failed_files += 1
+            self.replace_pool(run)
+            return
+        # chonkie and tree-sitter can raise anything on a malformed file;
+        # one bad file must not fail the repo.
+        except Exception as exc:  # noqa: BLE001
+            run.stats.failed_files += 1
             logger.warning(
                 "Failed chunking %s: %s", document.relative_path, exc
             )
+            return
+        self.record_file_result(document, file_chunks, run)
 
-        return pool
+    def retry_batch_per_file(
+        self,
+        batch: list[FileDocument],
+        normalized_language: str,
+        run: ChunkRun,
+        on_batch: Callable[[], None] | None,
+    ) -> None:
+        """Chunk each file of a failed batch on its own, isolating bad files.
+
+        Args:
+            batch: Same-language files whose batch call failed.
+            normalized_language: Normalized language shared by the batch.
+            run: The current chunking run.
+            on_batch: Called after each file, so a slow fallback still
+                reports progress and honours the timeout.
+        """
+        for document in batch:
+            self.chunk_one_with_recovery(document, normalized_language, run)
+            if on_batch is not None:
+                on_batch()
 
     def chunk_batch_with_fallback(
         self,
         batch: list[FileDocument],
         normalized_language: str,
-        repo_id: str,
-        source_url: str,
-        pool: Pool,
-        stats: ChunkingStats,
-        all_chunks: list[CodeChunk],
+        run: ChunkRun,
         on_batch: Callable[[], None] | None = None,
-    ) -> Pool:
+    ) -> None:
         """Chunk a same-language batch in one subprocess call.
 
         If the batch fails, retry each file on its own to isolate the bad
@@ -412,20 +435,12 @@ class ASTCodeChunker:
         Args:
             batch: Same-language files to chunk.
             normalized_language: Normalized language shared by the batch.
-            repo_id: Repository id to stamp on each chunk.
-            source_url: Repository URL to stamp on each chunk.
-            pool: Single-worker pool to run the job in.
-            stats: Stats object to update in place.
-            all_chunks: Accumulator list, extended in place.
+            run: The current chunking run.
             on_batch: Called after each per-file retry, so a slow fallback
                 still reports progress and honours the timeout.
-
-        Returns:
-            The pool to keep using — a fresh one if the worker crashed or
-            hung.
         """
         try:
-            async_result = pool.apply_async(
+            async_result = run.pool.apply_async(
                 chunkify_batch_in_subprocess,
                 args=(
                     [d.content for d in batch],
@@ -435,46 +450,37 @@ class ASTCodeChunker:
                 ),
             )
             batched_raw = get_result_fast(
-                pool, async_result, PER_FILE_TIMEOUT_SECONDS * len(batch)
+                run.pool, async_result, PER_FILE_TIMEOUT_SECONDS * len(batch)
             )
             # Build all chunks before recording any, so a mid-batch failure
             # can't record files twice when they are retried one by one.
             batch_chunks = [
                 self.build_code_chunks(
-                    document, raw_chunks, repo_id, source_url
+                    document, raw_chunks, run.repo_id, run.source_url
                 )
-                for document, raw_chunks in zip(batch, batched_raw, strict=True)
+                for document, raw_chunks in zip(
+                    batch, batched_raw, strict=True
+                )
             ]
-        except Exception as exc:
-            logger.warning(
-                "Batch of %d %s file(s) failed (%s) — retrying individually "
-                "to isolate the failing file(s).",
-                len(batch),
-                normalized_language,
-                exc,
+        except (WorkerLostError, TimeoutError) as exc:
+            log_batch_failure(batch, normalized_language, exc)
+            # A dead or stuck worker must be replaced before the retries.
+            self.replace_pool(run)
+            self.retry_batch_per_file(
+                batch, normalized_language, run, on_batch
             )
-            if isinstance(exc, (WorkerLostError, TimeoutError)):
-                # A dead or stuck worker must be replaced; other errors leave
-                # it usable.
-                pool.terminate()
-                pool = self.new_pool()
-            for document in batch:
-                pool = self.chunk_one_with_recovery(
-                    document,
-                    normalized_language,
-                    repo_id,
-                    source_url,
-                    pool,
-                    stats,
-                    all_chunks,
-                )
-                if on_batch is not None:
-                    on_batch()
-            return pool
+            return
+        # Any other failure leaves the worker usable; the per-file retries
+        # find (and count) the file that caused it.
+        except Exception as exc:  # noqa: BLE001
+            log_batch_failure(batch, normalized_language, exc)
+            self.retry_batch_per_file(
+                batch, normalized_language, run, on_batch
+            )
+            return
 
         for document, file_chunks in zip(batch, batch_chunks, strict=True):
-            self.record_file_result(document, file_chunks, stats, all_chunks)
-        return pool
+            self.record_file_result(document, file_chunks, run)
 
     def chunk(
         self,
@@ -501,7 +507,6 @@ class ASTCodeChunker:
         stats = ChunkingStats(
             total_documents_received=len(ingestion_result.documents)
         )
-        all_chunks: list[CodeChunk] = []
 
         documents_by_language: defaultdict[str, list[FileDocument]] = (
             defaultdict(list)
@@ -521,23 +526,43 @@ class ASTCodeChunker:
             stats.total_ast_eligible_documents += 1
             documents_by_language[normalized_language].append(document)
 
-        pool = self.new_pool()
+        run = ChunkRun(
+            repo_id=repo_id,
+            source_url=source_url,
+            stats=stats,
+            pool=self.new_pool(),
+        )
         try:
-            for normalized_language, documents in documents_by_language.items():
+            for (
+                normalized_language,
+                documents,
+            ) in documents_by_language.items():
                 for batch in batchify(documents, self.batch_size):
-                    pool = self.chunk_batch_with_fallback(
-                        batch,
-                        normalized_language,
-                        repo_id,
-                        source_url,
-                        pool,
-                        stats,
-                        all_chunks,
-                        on_batch,
+                    self.chunk_batch_with_fallback(
+                        batch, normalized_language, run, on_batch
                     )
                     if on_batch is not None:
                         on_batch()
         finally:
-            pool.terminate()
+            run.pool.terminate()
 
-        return ChunkingResult(chunks=all_chunks, stats=stats)
+        return ChunkingResult(chunks=run.chunks, stats=stats)
+
+
+def log_batch_failure(
+    batch: list[FileDocument], normalized_language: str, exc: Exception
+) -> None:
+    """Warn that a batch failed and is about to be retried file by file.
+
+    Args:
+        batch: The files in the failed batch.
+        normalized_language: Normalized language shared by the batch.
+        exc: The error the batch raised.
+    """
+    logger.warning(
+        "Batch of %d %s file(s) failed (%s) — retrying individually "
+        "to isolate the failing file(s).",
+        len(batch),
+        normalized_language,
+        exc,
+    )

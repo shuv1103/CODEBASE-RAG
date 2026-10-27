@@ -51,4 +51,3 @@ class EmbeddedChunk(BaseModel):
 
     token_estimate: int | None = None
     created_at: str = Field(default_factory=utc_now_iso)
-

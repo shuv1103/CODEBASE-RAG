@@ -1,5 +1,7 @@
 """v1 API routes: health, repo ingestion, status and chat."""
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, Request, Response, status
 
 from utils.config import settings
@@ -15,6 +17,9 @@ from ...schemas.status_schemas import (
 )
 
 router = APIRouter(prefix="/api")
+
+# The request's RagWorkflowFacade, injected by FastAPI.
+Workflow = Annotated[RagWorkflowFacade, Depends(get_rag_workflow)]
 
 
 @router.get("/health")
@@ -33,7 +38,7 @@ def create_repo(
     request: Request,
     payload: CreateRepoRequest,
     response: Response,
-    workflow: RagWorkflowFacade = Depends(get_rag_workflow),
+    workflow: Workflow,
 ) -> CreateRepoResponse:
     """Start (or reuse) an ingestion for a GitHub repository.
 
@@ -72,9 +77,7 @@ def create_repo(
 
 
 @router.get("/repos/{repo_id}", response_model=RepoStatusResponse)
-def get_repo(
-    repo_id: str, workflow: RagWorkflowFacade = Depends(get_rag_workflow)
-) -> RepoStatusResponse:
+def get_repo(repo_id: str, workflow: Workflow) -> RepoStatusResponse:
     """Return a repo's current ingestion status.
 
     Args:
@@ -98,7 +101,7 @@ async def chat(
     request: Request,
     repo_id: str,
     payload: ChatRequest,
-    workflow: RagWorkflowFacade = Depends(get_rag_workflow),
+    workflow: Workflow,
 ) -> ChatResponse:
     """Ask a question about an ingested repo.
 
@@ -123,4 +126,6 @@ async def chat(
     session_id, answer, cache_hit = await workflow.chat(
         repo_id, payload.message, payload.session_id
     )
-    return ChatResponse(session_id=session_id, answer=answer, cache_hit=cache_hit)
+    return ChatResponse(
+        session_id=session_id, answer=answer, cache_hit=cache_hit
+    )

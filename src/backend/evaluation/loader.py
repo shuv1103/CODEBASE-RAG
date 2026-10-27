@@ -23,7 +23,9 @@ class EvaluationDatasetLoader:
         >>> records = EvaluationDatasetLoader.load_json("evaluation/dataset.json")
     """
 
-    REQUIRED_FIELDS = {"question", "answer", "contexts", "ground_truth"}
+    REQUIRED_FIELDS = frozenset(
+        {"question", "answer", "contexts", "ground_truth"}
+    )
 
     @classmethod
     def load_json(cls, file_path: str | Path) -> list[dict[str, Any]]:

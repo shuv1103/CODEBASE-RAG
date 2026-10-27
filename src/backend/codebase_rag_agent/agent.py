@@ -1,5 +1,7 @@
 """Codebase Q&A agent (Google ADK) and its lazily built default instance."""
 
+import functools
+
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
@@ -9,7 +11,7 @@ from utils.config import settings
 from utils.model_config import build_llm_model
 from utils.rate_limiter import get_openai_budget
 
-from .tools import CodebaseRetrievalTool
+from .tools import CodebaseRetrievalTool, get_codebase_retrieval_tool
 from .tracing import (
     after_agent_callback,
     after_model_callback,
@@ -36,7 +38,6 @@ async def acquire_openai_budget(
         None, so ADK goes on to call the model.
     """
     await get_openai_budget().acquire_async()
-    return None
 
 
 def build_agent(retrieval_tool: CodebaseRetrievalTool) -> LlmAgent:
@@ -94,7 +95,14 @@ def build_agent(retrieval_tool: CodebaseRetrievalTool) -> LlmAgent:
     )
 
 
-_root_agent: LlmAgent | None = None
+@functools.cache
+def get_root_agent() -> LlmAgent:
+    """Return the default root agent, building it on first call.
+
+    Returns:
+        The process-wide agent over the default (all-repos) retrieval tool.
+    """
+    return build_agent(get_codebase_retrieval_tool())
 
 
 def __getattr__(name: str) -> LlmAgent:
@@ -110,11 +118,5 @@ def __getattr__(name: str) -> LlmAgent:
         AttributeError: For any other attribute name.
     """
     if name == "root_agent":
-        global _root_agent
-        if _root_agent is None:
-            # Deferred: building the default tool creates network clients.
-            from .tools import codebase_retrieval_tool
-
-            _root_agent = build_agent(codebase_retrieval_tool)
-        return _root_agent
+        return get_root_agent()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

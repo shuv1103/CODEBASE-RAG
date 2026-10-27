@@ -1,6 +1,7 @@
 """Embedding input text and EmbeddedChunk records built from chunks."""
 
 from typing import Any
+
 from .embeddings_models import EmbeddedChunk
 
 
@@ -23,7 +24,7 @@ def estimate_token_count(text: str) -> int:
 
 
 def build_embedding_input_text(chunk: dict[str, Any]) -> str:
-    """Build the text that gets embedded for a chunk.
+    r"""Build the text that gets embedded for a chunk.
 
     Prefix the code with File, Path and Language headers (plus Symbol and
     Lines when known), so the embedding also captures where the code lives.
@@ -40,7 +41,7 @@ def build_embedding_input_text(chunk: dict[str, Any]) -> str:
         ...     "metadata": {"file_name": "a.py", "relative_path": "pkg/a.py",
         ...                  "language": "python", "start_line": 0, "end_line": 0},
         ... })
-        'File: a.py\\nPath: pkg/a.py\\nLanguage: python\\nLines: 0-0\\nCode:\\ndef f(): pass'
+        'File: a.py\nPath: pkg/a.py\nLanguage: python\nLines: 0-0\nCode:\ndef f(): pass'
     """
     content = chunk.get("content", "")
     metadata = chunk.get("metadata", {}) or {}

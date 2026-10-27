@@ -70,7 +70,9 @@ class SemanticCacheRepository(ABC):
         """
 
     @abstractmethod
-    def store(self, repo_id: str, normalized_query: str, response: str) -> None:
+    def store(
+        self, repo_id: str, normalized_query: str, response: str
+    ) -> None:
         """Cache a response for a normalized query. Never raises.
 
         Args:
@@ -124,7 +126,7 @@ class LangCacheRepository(SemanticCacheRepository):
         cache_id: LangCache cache ID. Defaults to LANGCACHE_CACHE_ID.
         api_key: LangCache service API key. Defaults to LANGCACHE_API_KEY.
         ttl_seconds: Entry lifetime. Defaults to LANGCACHE_TTL (3600).
-        similarity_threshold: Minimum similarity (0.5–1.0) for a semantic
+        similarity_threshold: Minimum similarity (0.5 to 1.0) for a semantic
             hit. Defaults to LANGCACHE_SIMILARITY_THRESHOLD, or the cache's
             own threshold setting when unset.
 
@@ -146,7 +148,9 @@ class LangCacheRepository(SemanticCacheRepository):
         server_url = server_url or settings.langcache_server_url
         cache_id = cache_id or settings.langcache_cache_id
         api_key = api_key or settings.langcache_api_key.get_secret_value()
-        ttl = ttl_seconds if ttl_seconds is not None else settings.langcache_ttl
+        ttl = (
+            ttl_seconds if ttl_seconds is not None else settings.langcache_ttl
+        )
         self._ttl_millis = ttl * 1000
         self._similarity_threshold = (
             similarity_threshold
@@ -235,7 +239,9 @@ class LangCacheRepository(SemanticCacheRepository):
             nearest_similarity=similarity,
         )
 
-    def store(self, repo_id: str, normalized_query: str, response: str) -> None:
+    def store(
+        self, repo_id: str, normalized_query: str, response: str
+    ) -> None:
         """Cache a non-empty answer for this repo until the TTL. Never raises.
 
         Args:

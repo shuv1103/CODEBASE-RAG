@@ -391,7 +391,9 @@ class RagWorkflowFacade:
         session = None
         if session_id:
             session = await runner.session_service.get_session(
-                app_name=runner.app_name, user_id=user_id, session_id=session_id
+                app_name=runner.app_name,
+                user_id=user_id,
+                session_id=session_id,
             )
 
         if session is None:
@@ -441,7 +443,11 @@ class RagWorkflowFacade:
             )
             logger.info(
                 "Chat turn served from cache",
-                extra={"repo_id": repo_id, "turn": turn, "outcome": cache_result.outcome},
+                extra={
+                    "repo_id": repo_id,
+                    "turn": turn,
+                    "outcome": cache_result.outcome,
+                },
             )
             return (
                 session.id,
@@ -451,6 +457,7 @@ class RagWorkflowFacade:
 
         # Only cache misses reach the LLM, so only they take a concurrency slot.
         answer = ""
+        started = time.perf_counter()
         async with self._llm_concurrency.slot():
             async for event in runner.run_async(
                 user_id=user_id,
@@ -470,6 +477,8 @@ class RagWorkflowFacade:
                         if getattr(part, "text", None)
                     )
 
+        # Includes waiting for a concurrency slot, as the user experiences it.
+        agent_ms = round((time.perf_counter() - started) * 1000)
         if not answer:
             raise AgentResponseError("Agent did not produce a response")
 
@@ -482,7 +491,12 @@ class RagWorkflowFacade:
         )
         logger.info(
             "Chat turn answered by agent",
-            extra={"repo_id": repo_id, "turn": turn, "outcome": cache_result.outcome},
+            extra={
+                "repo_id": repo_id,
+                "turn": turn,
+                "outcome": cache_result.outcome,
+                "agent_ms": agent_ms,
+            },
         )
 
         return session.id, answer, None

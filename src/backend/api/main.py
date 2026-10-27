@@ -10,9 +10,10 @@ from utils.logging_config import configure_logging
 from .core.body_limit import BodySizeLimitMiddleware
 from .core.exceptions import register_exception_handlers
 from .core.rate_limit import limiter
+from .core.request_id import RequestIdMiddleware
 from .routes.v1.status_routes import router
 
-configure_logging()
+configure_logging(service="api")
 
 if not settings.agent_model:
     raise RuntimeError("AGENT_MODEL must be set to run the API")
@@ -35,7 +36,11 @@ app.add_middleware(
     allow_origins=settings.api_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
+
+# Added last so it is outermost: even 413s and CORS rejections get an id.
+app.add_middleware(RequestIdMiddleware)
 
 register_exception_handlers(app)
 app.include_router(router)

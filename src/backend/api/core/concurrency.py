@@ -41,7 +41,7 @@ class LLMConcurrencyLimiter:
             await asyncio.wait_for(
                 self._semaphore.acquire(), timeout=self._queue_timeout_seconds
             )
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise LLMBusyError(retry_after_seconds=5) from exc
         try:
             yield

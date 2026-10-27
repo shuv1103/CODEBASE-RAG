@@ -9,3 +9,6 @@ pandas==3.0.6
 # Test suite: pytest (config in pytest.ini)
 pytest==9.1.1
 pytest-asyncio==1.4.0
+
+# Lint + format (config in ruff.toml)
+ruff==0.17.3

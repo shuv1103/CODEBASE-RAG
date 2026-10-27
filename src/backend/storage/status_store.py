@@ -3,14 +3,32 @@
 import threading
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
+from typing import TypedDict, Unpack
 
 from pydantic import BaseModel
 
 from utils.time_utils import utc_now_iso
 
 IN_FLIGHT_STATUSES = frozenset({"pending", "cloning", "chunking", "embedding"})
+
+
+class StatusFields(TypedDict, total=False):
+    """RepoStatus fields a status write may overwrite (all optional).
+
+    Typing the **fields of every update with this makes a misspelt field
+    (say chunks_embeded=) a type error instead of a silently ignored key.
+    """
+
+    url: str
+    status: str
+    chunks_total: int | None
+    chunks_embedded: int | None
+    error: str | None
+    created_at: str
+    ready_at: str | None
+    updated_at: str | None
+    attempt_id: str | None
 
 
 class PublicRepoStatus(BaseModel):
@@ -72,7 +90,7 @@ class RepoStatus(PublicRepoStatus):
             attempt_id=uuid.uuid4().hex,
         )
 
-    def with_updates(self, **fields: Any) -> "RepoStatus":
+    def with_updates(self, **fields: Unpack[StatusFields]) -> "RepoStatus":
         """Return a copy with fields overwritten and updated_at set to now.
 
         Args:
@@ -107,12 +125,12 @@ class RepoStatus(PublicRepoStatus):
         # so its staleness can't be judged by the running-task threshold.
         threshold = (
             pending_stale_after_seconds
-            if self.status == "pending" and pending_stale_after_seconds
-            is not None
+            if self.status == "pending"
+            and pending_stale_after_seconds is not None
             else stale_after_seconds
         )
         last_write = datetime.fromisoformat(self.updated_at or self.created_at)
-        age = (now or datetime.now(timezone.utc)) - last_write
+        age = (now or datetime.now(UTC)) - last_write
         return age.total_seconds() > threshold
 
 
@@ -149,7 +167,7 @@ class StatusStore(ABC):
         """
 
     @abstractmethod
-    def update(self, repo_id: str, **fields: Any) -> None:
+    def update(self, repo_id: str, **fields: Unpack[StatusFields]) -> None:
         """Merge fields into the existing record for a repo. No-op if unknown.
 
         Args:
@@ -159,7 +177,10 @@ class StatusStore(ABC):
 
     @abstractmethod
     def update_if_attempt(
-        self, repo_id: str, expected_attempt_id: str | None, **fields: Any
+        self,
+        repo_id: str,
+        expected_attempt_id: str | None,
+        **fields: Unpack[StatusFields],
     ) -> bool:
         """Atomically merge fields only if the record's attempt_id matches.
 
@@ -222,7 +243,7 @@ class InMemoryStatusStore(StatusStore):
             self._records[repo_id] = record
             return record, True
 
-    def update(self, repo_id: str, **fields: Any) -> None:
+    def update(self, repo_id: str, **fields: Unpack[StatusFields]) -> None:
         """Merge fields into a repo's record. No-op if unknown.
 
         Args:
@@ -236,7 +257,10 @@ class InMemoryStatusStore(StatusStore):
             self._records[repo_id] = existing.with_updates(**fields)
 
     def update_if_attempt(
-        self, repo_id: str, expected_attempt_id: str | None, **fields: Any
+        self,
+        repo_id: str,
+        expected_attempt_id: str | None,
+        **fields: Unpack[StatusFields],
     ) -> bool:
         """Merge fields under the lock only if the attempt still matches.
 

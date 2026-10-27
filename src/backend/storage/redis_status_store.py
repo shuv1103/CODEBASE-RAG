@@ -1,13 +1,13 @@
 """Redis-backed repo status store shared by the API and workers."""
 
 from collections.abc import Iterator
-from typing import Any
+from typing import Unpack
 
 import redis
 
 from utils.config import settings
 
-from .status_store import RepoStatus, StatusStore
+from .status_store import RepoStatus, StatusFields, StatusStore
 
 _KEY_PREFIX = "codebase-rag:repo-status:"
 _POOL_WAIT_SECONDS = 10
@@ -102,7 +102,7 @@ class RedisStatusStore(StatusStore):
             return self.create_if_absent(repo_id, url)
         return existing, False
 
-    def update(self, repo_id: str, **fields: Any) -> None:
+    def update(self, repo_id: str, **fields: Unpack[StatusFields]) -> None:
         """Merge fields into a repo's record and rewrite it. No-op if unknown.
 
         Args:
@@ -130,7 +130,10 @@ class RedisStatusStore(StatusStore):
                 yield record
 
     def update_if_attempt(
-        self, repo_id: str, expected_attempt_id: str | None, **fields: Any
+        self,
+        repo_id: str,
+        expected_attempt_id: str | None,
+        **fields: Unpack[StatusFields],
     ) -> bool:
         """Merge fields into a repo's record only if its attempt still matches.
 

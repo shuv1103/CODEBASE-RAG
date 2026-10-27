@@ -1,7 +1,9 @@
 """Models for code chunks and chunking statistics."""
 
 from typing import Any
+
 from pydantic import BaseModel, Field
+
 
 class ChunkMetadata(BaseModel):
     """Metadata describing one code chunk and the file it came from.

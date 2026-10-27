@@ -4,10 +4,24 @@ import logging
 import ssl
 
 from celery import Celery
+from celery.signals import setup_logging
 
 from utils.config import settings
+from utils.logging_config import configure_logging
 
 logger = logging.getLogger(__name__)
+
+
+@setup_logging.connect
+def configure_worker_logging(**_kwargs: object) -> None:
+    """Use the app's log format in the worker instead of Celery's.
+
+    Connecting this signal stops Celery hijacking the root logger, which
+    would drop extra={...} fields and ignore LOG_LEVEL (--loglevel is then
+    unused). Only the worker fires it; the API imports this module freely.
+    """
+    configure_logging(service="worker")
+
 
 # Celery refuses a rediss:// URL whose SSL options don't say how to verify
 # the server certificate.

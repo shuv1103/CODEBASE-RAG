@@ -120,14 +120,14 @@ class RetrievalService:
     def format_symbol(
         symbol_name: str | None, parent_symbol: str | None
     ) -> str:
-        """Format the "Symbol:" line of a context block.
+        r"""Format the "Symbol:" line of a context block.
 
         Args:
             symbol_name: Chunk's symbol name, if any.
             parent_symbol: Enclosing symbol name, if any.
 
         Returns:
-            "Symbol: parent.name\\n", "Symbol: name\\n", or "" when unknown.
+            "Symbol: parent.name\n", "Symbol: name\n", or "" when unknown.
         """
         if symbol_name and parent_symbol:
             return f"Symbol: {parent_symbol}.{symbol_name}\n"
@@ -137,14 +137,14 @@ class RetrievalService:
 
     @staticmethod
     def format_location(start_line: int | None, end_line: int | None) -> str:
-        """Format the line-range line of a context block.
+        r"""Format the line-range line of a context block.
 
         Args:
             start_line: First line of the chunk, if known.
             end_line: Last line of the chunk, if known.
 
         Returns:
-            "Lines: a-b\\n", "Start Line: a\\n", or "" when unknown.
+            "Lines: a-b\n", "Start Line: a\n", or "" when unknown.
         """
         if start_line is not None and end_line is not None:
             return f"Lines: {start_line}-{end_line}\n"

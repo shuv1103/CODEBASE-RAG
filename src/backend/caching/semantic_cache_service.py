@@ -74,7 +74,11 @@ class SemanticCacheService:
         if self.is_blocked(repo_id, key):
             logger.info(
                 "Semantic cache bypassed (PII detected)",
-                extra={"cache_event": "blocked", "repo_id": repo_id, "scope": scope},
+                extra={
+                    "cache_event": "blocked",
+                    "repo_id": repo_id,
+                    "scope": scope,
+                },
             )
             return CacheLookupResult(answer=None, outcome="blocked")
 
@@ -84,7 +88,11 @@ class SemanticCacheService:
         if result.hit is not None and result.hit.strategy == "exact":
             logger.info(
                 "Exact cache hit",
-                extra={"cache_event": "exact_hit", "repo_id": repo_id, "scope": scope},
+                extra={
+                    "cache_event": "exact_hit",
+                    "repo_id": repo_id,
+                    "scope": scope,
+                },
             )
             return CacheLookupResult(
                 answer=result.hit.response,
@@ -166,7 +174,10 @@ class SemanticCacheService:
         """
         if previous_question is None:
             return repo_id, message
-        return f"{repo_id}{FOLLOW_UP_SCOPE_SUFFIX}", f"{previous_question}\n{message}"
+        return (
+            f"{repo_id}{FOLLOW_UP_SCOPE_SUFFIX}",
+            f"{previous_question}\n{message}",
+        )
 
     def invalidate(self, repo_id: str) -> None:
         """Drop every cached answer for a repo. Never raises.

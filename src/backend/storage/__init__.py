@@ -6,6 +6,7 @@ from .status_store import (
     InMemoryStatusStore,
     PublicRepoStatus,
     RepoStatus,
+    StatusFields,
     StatusStore,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "PublicRepoStatus",
     "RedisStatusStore",
     "RepoStatus",
+    "StatusFields",
     "StatusStore",
 ]

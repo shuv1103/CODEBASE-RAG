@@ -79,8 +79,11 @@ def admit_new_ingestion() -> None:
     try:
         if limiter.limiter.hit(item, _INGESTION_CAP_KEY):
             return
-        reset_at, _ = limiter.limiter.get_window_stats(item, _INGESTION_CAP_KEY)
-    except Exception:
+        reset_at, _ = limiter.limiter.get_window_stats(
+            item, _INGESTION_CAP_KEY
+        )
+    # Fails open, like slowapi: any storage error admits the request.
+    except Exception:  # noqa: BLE001
         logger.warning("Ingestion cap storage unavailable; admitting request")
         return
     raise IngestionCapError(max(1, int(reset_at - time.time())))

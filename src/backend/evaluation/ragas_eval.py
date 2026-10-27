@@ -13,15 +13,21 @@ from datasets import Dataset
 # google.generativeai package; Gemini isn't used, so its warning is noise.
 warnings.filterwarnings("ignore", category=FutureWarning, module="instructor")
 
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    CallbackManagerForLLMRun,
+)
+from langchain_core.messages import BaseMessage
+from langchain_core.outputs import ChatResult
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from ragas import evaluate
-from ragas.run_config import RunConfig
-from ragas.llms import LangchainLLMWrapper
 from ragas.embeddings import LangchainEmbeddingsWrapper
+from ragas.llms import LangchainLLMWrapper
 from ragas.metrics._answer_relevance import answer_relevancy
 from ragas.metrics._context_precision import context_precision
 from ragas.metrics._context_recall import context_recall
 from ragas.metrics._faithfulness import faithfulness
+from ragas.run_config import RunConfig
 
 from utils.config import settings
 
@@ -58,6 +64,7 @@ def validate_env() -> None:
 # Throttling subclasses the LangChain OpenAI classes, because newer ragas
 # versions block subclassing its own (deprecated) wrapper classes.
 
+
 class _ThrottledChatOpenAI(ChatOpenAI):
     """ChatOpenAI with a per-call sleep to honour OpenAI rate limits.
 
@@ -67,14 +74,26 @@ class _ThrottledChatOpenAI(ChatOpenAI):
 
     sleep_seconds: float = 2.0
 
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
         """Sleep sleep_seconds, then call ChatOpenAI._generate."""
         time.sleep(self.sleep_seconds)
         return super()._generate(
             messages, stop=stop, run_manager=run_manager, **kwargs
         )
 
-    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
         """Sleep sleep_seconds, then call ChatOpenAI._agenerate."""
         await asyncio.sleep(self.sleep_seconds)
         return await super()._agenerate(
@@ -162,12 +181,14 @@ class RagasEvaluator:
         Returns:
             Dataset with question, answer, contexts, and ground_truth columns.
         """
-        return Dataset.from_dict({
-            "question":     [r["question"]     for r in records],
-            "answer":       [r["answer"]       for r in records],
-            "contexts":     [r["contexts"]     for r in records],
-            "ground_truth": [r["ground_truth"] for r in records],
-        })
+        return Dataset.from_dict(
+            {
+                "question": [r["question"] for r in records],
+                "answer": [r["answer"] for r in records],
+                "contexts": [r["contexts"] for r in records],
+                "ground_truth": [r["ground_truth"] for r in records],
+            }
+        )
 
     def evaluate(self, records: list[dict[str, Any]]) -> pd.DataFrame:
         """Score every record on the four RAGAS metrics.
@@ -232,7 +253,9 @@ class RagasEvaluator:
             dataset_name: LangSmith dataset to create or reuse.
         """
         if not settings.tracing_enabled:
-            logger.info("LangSmith tracing disabled — skipping dataset upload.")
+            logger.info(
+                "LangSmith tracing disabled — skipping dataset upload."
+            )
             return
 
         import langsmith

@@ -66,19 +66,14 @@ class CodebaseRetrievalTool:
 
 # Built on first access, not at import: it creates OpenAI and Qdrant
 # clients, which processes that only need the class (like the API) must not.
-_codebase_retrieval_tool: CodebaseRetrievalTool | None = None
-
-
+@functools.cache
 def get_codebase_retrieval_tool() -> CodebaseRetrievalTool:
     """Return the default tool singleton, building it on first call.
 
     Returns:
-        The module-level CodebaseRetrievalTool.
+        The process-wide CodebaseRetrievalTool.
     """
-    global _codebase_retrieval_tool
-    if _codebase_retrieval_tool is None:
-        _codebase_retrieval_tool = CodebaseRetrievalTool()
-    return _codebase_retrieval_tool
+    return CodebaseRetrievalTool()
 
 
 def __getattr__(name: str) -> CodebaseRetrievalTool:

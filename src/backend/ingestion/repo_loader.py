@@ -5,13 +5,15 @@ import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
+
 from utils.config import SKIP_DIRECTORIES, settings
 from utils.file_utility import (
+    get_file_size,
+    get_relative_path,
     is_supported_file,
     read_file_safe,
-    get_relative_path,
-    get_file_size,
 )
+
 from .language_detector import detect_language
 
 logger = logging.getLogger(__name__)

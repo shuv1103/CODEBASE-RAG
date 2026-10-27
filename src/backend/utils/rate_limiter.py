@@ -224,6 +224,7 @@ class ExponentialBackoff:
         Raises:
             Exception: Any non-retryable error immediately, or the last
                 rate-limit error once attempts are exhausted.
+            ValueError: If max_retries < 1.
         """
         budget = self._budget or get_openai_budget()
         for attempt in range(self.max_retries):
@@ -243,6 +244,8 @@ class ExponentialBackoff:
                     wait_time,
                 )
                 time.sleep(wait_time)
+        # Reached only when max_retries < 1, so api_func never ran.
+        raise ValueError(f"max_retries must be >= 1, got {self.max_retries}")
 
     def wait_seconds(self, e: Exception, attempt: int) -> float:
         """Return the seconds to wait before the next attempt.
@@ -254,7 +257,7 @@ class ExponentialBackoff:
         Returns:
             max(Retry-After, exponential + jitter), capped at max_wait_seconds.
         """
-        exponential = (2 ** attempt) + random.uniform(0, 1)
+        exponential = (2**attempt) + random.uniform(0, 1)
         retry_after = self.retry_after_seconds(e) or 0.0
         return min(max(exponential, retry_after), self._max_wait_seconds)
 

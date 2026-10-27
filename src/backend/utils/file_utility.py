@@ -2,11 +2,7 @@
 
 from pathlib import Path
 
-from .config import (
-    SUPPORTED_EXTENSIONS,
-    MAX_FILE_SIZE,
-    DEFAULT_ENCODING
-)
+from .config import DEFAULT_ENCODING, MAX_FILE_SIZE, SUPPORTED_EXTENSIONS
 
 
 def is_supported_file(file_path: Path) -> bool:
@@ -46,7 +42,6 @@ def read_file_safe(file_path: Path) -> str | None:
         The file's text content, or None if the file is too large or
         cannot be read.
     """
-
     try:
         size = get_file_size(file_path)
 

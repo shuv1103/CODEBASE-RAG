@@ -45,7 +45,7 @@ def relevant_files_from_contexts(contexts: list[str]) -> set[str]:
 
 
 def normalize_path(path: str) -> str:
-    """Normalize a path to forward slashes with no leading slash.
+    r"""Normalize a path to forward slashes with no leading slash.
 
     Args:
         path: A Windows- or POSIX-style relative path.
@@ -54,17 +54,17 @@ def normalize_path(path: str) -> str:
         The normalized path.
 
     Example:
-        >>> normalize_path("\\\\Repo\\\\backend\\\\A.java")
+        >>> normalize_path("\\Repo\\backend\\A.java")
         'Repo/backend/A.java'
     """
     return path.replace("\\", "/").strip().lstrip("/")
 
 
 def matches_relevant_file(retrieved_path: str, relevant_path: str) -> bool:
-    """Check whether a retrieved path refers to a ground-truth relevant file.
+    r"""Check whether a retrieved path refers to a ground-truth relevant file.
 
     Match by normalized suffix, not equality: stored paths use OS separators
-    and start at the folder given to RepoLoader ('Repo\\backend\\A.java' on
+    and start at the folder given to RepoLoader ('Repo\backend\A.java' on
     Windows), while dataset paths use forward slashes without that root
     ('backend/A.java'). Exact comparison would never match.
 
@@ -317,7 +317,13 @@ class MetricsEvaluator:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
-        except Exception:
+        # litellm raises a bare Exception for a model it has no price for.
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "No price for agent model %s (%s); counting its cost as $0",
+                self._agent_model,
+                exc,
+            )
             prompt_cost = completion_cost = 0.0
 
         try:
@@ -326,7 +332,13 @@ class MetricsEvaluator:
                 prompt_tokens=estimate_token_count(question),
                 completion_tokens=0,
             )
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "No price for embedding model %s (%s); counting its cost "
+                "as $0",
+                self._embedding_model,
+                exc,
+            )
             embedding_cost = 0.0
 
         return prompt_cost + completion_cost + embedding_cost
