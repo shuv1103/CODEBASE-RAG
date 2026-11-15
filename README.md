@@ -12,7 +12,7 @@
 ![Celery](https://img.shields.io/badge/Celery-5.6-37814A?style=flat-square&logo=celery&logoColor=white)
 ![Redis](https://img.shields.io/badge/Redis-LangCache-DD0031?style=flat-square&logo=redis&logoColor=white)
 ![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black)
-![Tests](https://img.shields.io/badge/pytest-457%20passing-22c55e?style=flat-square)
+![Pytest](https://img.shields.io/badge/pytest-passing-22c55e?style=flat-square&logo=pytest&logoColor=white)
 
 [Overview](#overview) · [Architecture](#architecture) · [How it works](#how-it-works-layer-by-layer) · [Evaluation](#evaluation--metrics) · [Performance](#performance--cost) · [Quickstart](#quickstart--deployment) · [Roadmap](#limitations--roadmap)
 
