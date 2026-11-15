@@ -8,25 +8,21 @@ from urllib.parse import urlparse
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.exceptions import UnexpectedResponse
 
+from models.embeddings_models import EmbeddedChunk
 from utils.config import settings
-
-from .embeddings_models import EmbeddedChunk
 
 logger = logging.getLogger(__name__)
 
 REPO_ID_FIELD = "repo_id"
+# Id of the ingestion run that last wrote a point (see delete_stale).
+INGEST_RUN_FIELD = "ingest_run_id"
 
 
 def get_qdrant_client() -> QdrantClient:
-    """Return a Qdrant client for the configured server.
-
-    Both QdrantVectorStore and the retriever connect through this, so a
-    local container and Qdrant Cloud differ only in QDRANT_URL and
-    QDRANT_API_KEY.
+    """Return a Qdrant client for QDRANT_URL.
 
     Returns:
-        A QdrantClient for QDRANT_URL (default http://localhost:6333),
-        authenticated with QDRANT_API_KEY when it is set.
+        A QdrantClient, authenticated with QDRANT_API_KEY when it is set.
     """
     url = settings.qdrant_url
     # Host only, at DEBUG, to keep the cluster address out of normal logs.
@@ -37,17 +33,11 @@ def get_qdrant_client() -> QdrantClient:
 
 
 def hnsw_config() -> models.HnswConfigDiff:
-    """Return the HNSW index settings for the collection's vectors.
-
-    m (links per node) and ef_construct (candidates checked per insert) set
-    how well-connected the graph is; higher ef_construct raises recall at
-    the cost of build time only. Below full_scan_threshold (KB of vectors
-    matched by a search's filter), Qdrant scans exactly instead of walking
-    the graph. payload_m is left unset, so the per-repo_id graphs use m.
+    """Return the collection's HNSW index settings.
 
     Returns:
-        HnswConfigDiff from QDRANT_HNSW_M (16), QDRANT_HNSW_EF_CONSTRUCT (200)
-        and QDRANT_HNSW_FULL_SCAN_THRESHOLD (10000).
+        HnswConfigDiff from QDRANT_HNSW_M, QDRANT_HNSW_EF_CONSTRUCT and
+        QDRANT_HNSW_FULL_SCAN_THRESHOLD.
     """
     return models.HnswConfigDiff(
         m=settings.qdrant_hnsw_m,
@@ -60,10 +50,10 @@ def repo_filter(repo_id: str) -> models.Filter:
     """Build a filter that matches only one repo's points.
 
     Args:
-        repo_id: Repository to match on the `repo_id` payload field.
+        repo_id: Value of the repo_id payload field to match.
 
     Returns:
-        A Qdrant filter for `repo_id == repo_id`.
+        A Qdrant filter for repo_id == repo_id.
     """
     return models.Filter(
         must=[
@@ -75,50 +65,33 @@ def repo_filter(repo_id: str) -> models.Filter:
 
 
 def point_id(repo_id: str, chunk_id: str) -> str:
-    """Derive a stable Qdrant point id for a chunk.
+    """Return a stable Qdrant point id for a chunk.
 
-    Qdrant ids must be unsigned integers or UUIDs, so the key is hashed
-    into a UUIDv5. It includes repo_id because chunk ids are only unique
-    within a repo, and all repos share one collection. Re-ingesting yields
-    the same ids, so upserts overwrite instead of duplicating.
+    Re-ingesting yields the same ids, so upserts overwrite.
 
     Args:
-        repo_id: Repository the chunk belongs to.
+        repo_id: Repo the chunk belongs to.
         chunk_id: Chunk id, unique within the repo.
 
     Returns:
-        The UUID as a string.
-
-    Example:
-        >>> point_id("c3460b930023", "README.md::chunk::0") == point_id("c3460b930023", "README.md::chunk::0")
-        True
+        UUIDv5 of "<repo_id>:<chunk_id>", as a string.
     """
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{repo_id}:{chunk_id}"))
 
 
 class QdrantVectorStore:
-    """Write-side wrapper around the shared Qdrant collection.
+    """Write side of the shared chunk collection, filtered by repo_id.
 
-    All repos share one collection, separated by a tenant-indexed `repo_id`
-    payload field, per Qdrant's multitenancy guidance. The collection is
-    created on the first upsert, with cosine distance and the vector size of
-    the first batch.
+    The collection is created on the first upsert (cosine distance).
 
     Args:
-        repo_id: Repository this store is scoped to for count() and
-            delete_repo(). Empty means the whole collection.
-        collection_name: Collection to write to. Defaults to
-            QDRANT_COLLECTION, then "code_chunks".
-
-    Attributes:
-        client: The underlying Qdrant client.
-        collection_name: The target collection.
-        repo_id: The repo scope for count() and delete_repo().
+        repo_id: Scope for count() and delete_stale(); empty means the whole
+            collection.
+        collection_name: Defaults to QDRANT_COLLECTION.
 
     Example:
         >>> store = QdrantVectorStore(repo_id="c3460b930023")
-        >>> store.upsert(embedded_chunks)
-        >>> print(store.count())
+        >>> store.upsert(embedded_chunks, run_id=run_id)
     """
 
     def __init__(
@@ -127,7 +100,7 @@ class QdrantVectorStore:
         self.client = get_qdrant_client()
         self.collection_name = collection_name or settings.qdrant_collection
         self.repo_id = repo_id
-        self._hnsw_synced = False
+        self._collection_ready = False
         logger.debug(
             "Qdrant collection %s (repo_id=%s)",
             self.collection_name,
@@ -135,48 +108,78 @@ class QdrantVectorStore:
         )
 
     def ensure_collection(self, vector_size: int) -> None:
-        """Create the collection and its tenant index if they don't exist yet.
+        """Create the collection if missing, then sync HNSW and indexes once.
 
-        Safe to call from several workers at once: if another process
-        creates the collection first, the error is ignored. An existing
-        collection gets the configured HNSW settings once per store.
+        Safe when several workers race to create it.
 
         Args:
             vector_size: Embedding dimension for a new collection.
+
+        Raises:
+            UnexpectedResponse: If Qdrant rejects a creation for another
+                reason.
         """
-        if self._hnsw_synced:
+        if self._collection_ready:
             return
         if self.client.collection_exists(self.collection_name):
             self.sync_hnsw_config()
-            return
-        try:
-            self.client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=models.VectorParams(
-                    size=vector_size,
-                    distance=models.Distance.COSINE,
-                    hnsw_config=hnsw_config(),
-                ),
+        else:
+            try:
+                self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=models.VectorParams(
+                        size=vector_size,
+                        distance=models.Distance.COSINE,
+                        hnsw_config=hnsw_config(),
+                    ),
+                )
+            except UnexpectedResponse:
+                # Another worker created it first; anything else re-raises.
+                if not self.client.collection_exists(self.collection_name):
+                    raise
+        # Outside the try, so an index failure surfaces; the flag is set only
+        # after it succeeds, so this store's next upsert retries it.
+        self.ensure_payload_indexes()
+        self._collection_ready = True
+
+    def ensure_payload_indexes(self) -> None:
+        """Create the repo_id (tenant) and ingest_run_id indexes if missing.
+
+        Qdrant Cloud's strict mode rejects filters on unindexed fields.
+
+        Raises:
+            UnexpectedResponse: If Qdrant rejects an index creation.
+        """
+        schema = (
+            self.client.get_collection(self.collection_name).payload_schema
+            or {}
+        )
+        for field, is_tenant in (
+            (REPO_ID_FIELD, True),
+            (INGEST_RUN_FIELD, False),
+        ):
+            if field in schema:
+                continue
+            logger.info(
+                "Creating %s index on collection %s",
+                field,
+                self.collection_name,
             )
             self.client.create_payload_index(
                 collection_name=self.collection_name,
-                field_name=REPO_ID_FIELD,
+                field_name=field,
                 field_schema=models.KeywordIndexParams(
                     type=models.KeywordIndexType.KEYWORD,
-                    is_tenant=True,
+                    is_tenant=is_tenant,
                 ),
+                wait=True,
             )
-        except UnexpectedResponse:
-            if not self.client.collection_exists(self.collection_name):
-                raise
-        self._hnsw_synced = True
 
     def sync_hnsw_config(self) -> None:
         """Apply the configured HNSW settings to an existing collection.
 
-        create_collection only configures new collections, so an older one
-        keeps its settings until updated here. Qdrant rebuilds the graph in
-        the background while searches keep working.
+        Only updates when the live settings differ; Qdrant rebuilds in the
+        background while searches keep working.
         """
         desired = hnsw_config()
         config = self.client.get_collection(self.collection_name).config
@@ -205,13 +208,18 @@ class QdrantVectorStore:
                 current,
                 target,
             )
-        self._hnsw_synced = True
 
-    def upsert(self, embedded_chunks: Sequence[EmbeddedChunk]) -> None:
-        """Insert or update chunks, keyed by (repo_id, chunk_id).
+    def upsert(
+        self,
+        embedded_chunks: Sequence[EmbeddedChunk],
+        *,
+        run_id: str | None = None,
+    ) -> None:
+        """Insert or overwrite chunks, keyed by point_id(repo_id, chunk_id).
 
         Args:
-            embedded_chunks: EmbeddedChunk objects to write; a no-op if empty.
+            embedded_chunks: Chunks to write; a no-op if empty.
+            run_id: Ingestion run, stored as ingest_run_id for delete_stale().
         """
         if not embedded_chunks:
             return
@@ -229,16 +237,10 @@ class QdrantVectorStore:
                     "file_name": chunk.file_name,
                     "language": chunk.language,
                     "chunk_type": chunk.chunk_type,
-                    "symbol_name": chunk.symbol_name,
-                    "parent_symbol": chunk.parent_symbol,
                     "start_line": chunk.start_line,
                     "end_line": chunk.end_line,
                     REPO_ID_FIELD: chunk.repo_id,
-                    "source_url": chunk.source_url,
-                    "embedding_model": chunk.embedding_model,
-                    "embedding_dimension": chunk.embedding_dimension,
-                    "token_estimate": chunk.token_estimate,
-                    "created_at": chunk.created_at,
+                    INGEST_RUN_FIELD: run_id,
                 },
             )
             for chunk in embedded_chunks
@@ -249,11 +251,11 @@ class QdrantVectorStore:
         )
 
     def count(self) -> int:
-        """Return how many chunks are stored for this store's repo.
+        """Return how many points the store's repo has.
 
         Returns:
-            The exact point count for repo_id, or for the whole collection
-            when repo_id is empty; 0 if the collection doesn't exist yet.
+            The exact count for repo_id (the whole collection when empty); 0 if
+            the collection doesn't exist.
         """
         if not self.client.collection_exists(self.collection_name):
             return 0
@@ -264,32 +266,49 @@ class QdrantVectorStore:
             exact=True,
         ).count
 
-    def delete_repo(self) -> None:
-        """Delete every point belonging to this store's repo.
+    def delete_stale(self, run_id: str) -> None:
+        """Delete this repo's points that run_id didn't write.
+
+        Called after the run's last batch, so a failed run keeps the old index.
+
+        Args:
+            run_id: The ingestion run whose points are kept.
 
         Raises:
-            ValueError: If the store has no repo_id (refuses to wipe the
-                whole collection).
+            ValueError: If the store has no repo_id or run_id is empty.
         """
-        if not self.repo_id:
+        if not self.repo_id or not run_id:
             raise ValueError(
-                "delete_repo() needs a repo_id; "
-                "refusing to delete the whole collection"
+                "delete_stale() needs a repo_id and a run_id; "
+                "refusing to delete across the whole collection"
             )
         if not self.client.collection_exists(self.collection_name):
             return
+        # Points without ingest_run_id don't match the must_not, so they go.
+        stale = models.Filter(
+            must=repo_filter(self.repo_id).must,
+            must_not=[
+                models.FieldCondition(
+                    key=INGEST_RUN_FIELD,
+                    match=models.MatchValue(value=run_id),
+                )
+            ],
+        )
         self.client.delete(
             collection_name=self.collection_name,
-            points_selector=models.FilterSelector(
-                filter=repo_filter(self.repo_id)
-            ),
+            points_selector=models.FilterSelector(filter=stale),
             wait=True,
         )
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Log the collection's point count (local debugging)."""
     from utils.logging_config import configure_logging
 
     configure_logging()
     store = QdrantVectorStore()
     logger.info("Total chunks in store: %d", store.count())
+
+
+if __name__ == "__main__":
+    main()

@@ -5,21 +5,20 @@ from urllib.parse import urlparse
 
 
 def normalize_github_url(url: str) -> str:
-    """Validate a github.com repository URL and return its canonical form.
+    """Validate a github.com repo URL and return its canonical form.
 
-    The canonical form is https://github.com/<org>/<repo>, with no trailing
-    slash, `.git` suffix, query string or fragment, so one repo always maps
-    to one string however the user typed it.
+    Trailing slashes, ".git", query strings and fragments are dropped, so one
+    repo always maps to one string.
 
     Args:
-        url: User-supplied GitHub repository URL.
+        url: User-supplied repository URL.
 
     Returns:
-        The canonical https://github.com/<org>/<repo> URL.
+        "https://github.com/<org>/<repo>".
 
     Raises:
-        ValueError: If the URL is not an http(s) github.com URL, or is
-            missing the org/user or repo segment.
+        ValueError: If it is not an http(s) github.com URL with an org and a
+            repo.
 
     Example:
         >>> normalize_github_url("https://github.com/org/repo.git/")
@@ -52,10 +51,10 @@ def compute_repo_id(normalized_url: str) -> str:
     """Compute a stable short id for a normalized repo URL.
 
     Args:
-        normalized_url: URL already passed through normalize_github_url.
+        normalized_url: Output of normalize_github_url.
 
     Returns:
-        The first 12 hex characters of the URL's SHA-1 digest.
+        The first 12 hex characters of the URL's SHA-1.
 
     Example:
         >>> compute_repo_id("https://github.com/org/repo")

@@ -1,8 +1,7 @@
 """Embedding input text and EmbeddedChunk records built from chunks."""
 
-from typing import Any
-
-from .embeddings_models import EmbeddedChunk
+from models.chunk_models import CodeChunk
+from models.embeddings_models import EmbeddedChunk
 
 
 def estimate_token_count(text: str) -> int:
@@ -13,100 +12,56 @@ def estimate_token_count(text: str) -> int:
 
     Returns:
         0 for empty text, otherwise at least 1.
-
-    Example:
-        >>> estimate_token_count("def f(): pass")
-        3
     """
     if not text:
         return 0
     return max(1, len(text) // 4)
 
 
-def build_embedding_input_text(chunk: dict[str, Any]) -> str:
-    r"""Build the text that gets embedded for a chunk.
-
-    Prefix the code with File, Path and Language headers (plus Symbol and
-    Lines when known), so the embedding also captures where the code lives.
+def build_embedding_input_text(chunk: CodeChunk) -> str:
+    """Build the text embedded for a chunk: location headers, then the code.
 
     Args:
-        chunk: Serialized CodeChunk dict with "content" and "metadata".
+        chunk: The code chunk.
 
     Returns:
-        The newline-joined header lines followed by "Code:" and the content.
-
-    Example:
-        >>> build_embedding_input_text({
-        ...     "content": "def f(): pass",
-        ...     "metadata": {"file_name": "a.py", "relative_path": "pkg/a.py",
-        ...                  "language": "python", "start_line": 0, "end_line": 0},
-        ... })
-        'File: a.py\nPath: pkg/a.py\nLanguage: python\nLines: 0-0\nCode:\ndef f(): pass'
+        "File:", "Path:" and "Language:" lines (plus "Lines:" when known),
+        then "Code:" and the content.
     """
-    content = chunk.get("content", "")
-    metadata = chunk.get("metadata", {}) or {}
-
-    relative_path = metadata.get("relative_path", "")
-    file_name = metadata.get("file_name", "")
-    language = metadata.get("language", "unknown")
-    symbol_name = metadata.get("symbol_name")
-    start_line = metadata.get("start_line")
-    end_line = metadata.get("end_line")
-
-    parts: list[str] = [
-        f"File: {file_name}",
-        f"Path: {relative_path}",
-        f"Language: {language}",
+    metadata = chunk.metadata
+    parts = [
+        f"File: {metadata.file_name}",
+        f"Path: {metadata.relative_path}",
+        f"Language: {metadata.language}",
     ]
-
-    if symbol_name:
-        parts.append(f"Symbol: {symbol_name}")
-
-    if start_line is not None and end_line is not None:
-        parts.append(f"Lines: {start_line}-{end_line}")
-
-    parts.extend(("Code:", content))
-
+    if metadata.start_line is not None and metadata.end_line is not None:
+        parts.append(f"Lines: {metadata.start_line}-{metadata.end_line}")
+    parts.extend(("Code:", chunk.content))
     return "\n".join(parts).strip()
 
 
 def build_embedded_chunk(
-    raw_chunk: dict[str, Any],
-    vector: list[float],
-    model_name: str,
+    chunk: CodeChunk, vector: list[float]
 ) -> EmbeddedChunk:
-    """Combine a serialized chunk and its vector into an EmbeddedChunk.
+    """Combine a chunk and its vector into an EmbeddedChunk.
 
     Args:
-        raw_chunk: Serialized CodeChunk dict with "content" and "metadata".
-        vector: Embedding vector for the chunk.
-        model_name: Embedding model that produced the vector.
+        chunk: The code chunk.
+        vector: The chunk's embedding.
 
     Returns:
-        The EmbeddedChunk, with embedding_input_text and token_estimate
-        derived from the chunk.
+        The EmbeddedChunk, with its embedding input text.
     """
-    metadata = raw_chunk.get("metadata", {}) or {}
-    extra = metadata.get("extra", {}) or {}
-
-    embedding_input_text = build_embedding_input_text(raw_chunk)
-
+    metadata = chunk.metadata
     return EmbeddedChunk(
-        chunk_id=metadata.get("chunk_id", ""),
-        relative_path=metadata.get("relative_path", ""),
-        file_name=metadata.get("file_name", ""),
-        language=metadata.get("language", "unknown"),
-        chunk_type=metadata.get("chunking_strategy", "ast"),
-        symbol_name=metadata.get("symbol_name"),
-        parent_symbol=extra.get("parent_symbol"),
-        start_line=metadata.get("start_line"),
-        end_line=metadata.get("end_line"),
-        repo_id=metadata.get("repo_id", ""),
-        source_url=metadata.get("source_url", ""),
-        content=raw_chunk.get("content"),
-        embedding_input_text=embedding_input_text,
-        embedding_model=model_name,
-        embedding_dimension=len(vector),
+        chunk_id=metadata.chunk_id,
+        relative_path=metadata.relative_path,
+        file_name=metadata.file_name,
+        language=metadata.language,
+        chunk_type=metadata.chunking_strategy,
+        start_line=metadata.start_line,
+        end_line=metadata.end_line,
+        repo_id=metadata.repo_id,
+        embedding_input_text=build_embedding_input_text(chunk),
         vector=vector,
-        token_estimate=estimate_token_count(embedding_input_text),
     )

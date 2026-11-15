@@ -1,23 +1,4 @@
-"""Answer cache for chat turns, with PII detection and query normalization."""
+"""Answer cache for chat turns, with PII detection and query normalization.
 
-from .pii_detector import contains_pii, redact_pii
-from .query_normalizer import normalize_query
-from .semantic_cache_repository import (
-    CacheHit,
-    LangCacheRepository,
-    SemanticCacheRepository,
-    SemanticLookupResult,
-)
-from .semantic_cache_service import CacheLookupResult, SemanticCacheService
-
-__all__ = [
-    "CacheHit",
-    "CacheLookupResult",
-    "LangCacheRepository",
-    "SemanticCacheRepository",
-    "SemanticCacheService",
-    "SemanticLookupResult",
-    "contains_pii",
-    "normalize_query",
-    "redact_pii",
-]
+Nothing is re-exported: import each module by its full path.
+"""

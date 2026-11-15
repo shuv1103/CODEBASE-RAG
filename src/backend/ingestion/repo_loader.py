@@ -4,148 +4,59 @@ import logging
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, Field, model_validator
-
+from models.ingestion_models import (
+    FileDocument,
+    IngestionResult,
+    IngestionStats,
+)
 from utils.config import SKIP_DIRECTORIES, settings
 from utils.file_utility import (
-    get_file_size,
-    get_relative_path,
+    detect_language,
     is_supported_file,
     read_file_safe,
 )
 
-from .language_detector import detect_language
-
 logger = logging.getLogger(__name__)
 
 
-class IngestionStats(BaseModel):
-    """Counters collected while scanning and reading a repository.
-
-    Attributes:
-        total_files_scanned: Files seen outside skipped directories.
-        files_supported: Files with a supported extension.
-        files_read_success: Supported files read successfully.
-        files_skipped_extension: Files skipped for an unsupported extension.
-        files_skipped_size_or_error: Supported files skipped because they
-            were too large or unreadable.
-    """
-
-    total_files_scanned: int = 0
-    files_supported: int = 0
-    files_read_success: int = 0
-    files_skipped_extension: int = 0
-    files_skipped_size_or_error: int = 0
-
-
-class FileDocument(BaseModel):
-    """One source file loaded from a repository.
-
-    Attributes:
-        file_name: Base name of the file.
-        absolute_path: Absolute path on disk.
-        relative_path: Path relative to the repository root.
-        extension: Lowercased file extension, including the dot.
-        language: Language detected from the extension.
-        size_bytes: File size in bytes.
-        content: Full text content of the file.
-    """
-
-    file_name: str
-    absolute_path: str
-    relative_path: str
-    extension: str
-    language: str
-    size_bytes: int
-    content: str
-
-
-class IngestionResult(BaseModel):
-    """Output of RepoLoader.load().
-
-    Attributes:
-        documents: Successfully loaded file documents.
-        stats: Scan/read counters for the run.
-    """
-
-    documents: list[FileDocument] = Field(default_factory=list)
-    stats: IngestionStats = Field(default_factory=IngestionStats)
-
-
-class RepoConfig(BaseModel):
-    """Validated repository location.
-
-    Attributes:
-        repo_path: Path to an existing local directory.
-    """
-
-    repo_path: str
-
-    @model_validator(mode="after")
-    def validate_repo_path(self) -> "RepoConfig":
-        """Ensure repo_path exists and is a directory.
-
-        Returns:
-            The validated config.
-
-        Raises:
-            ValueError: If the path does not exist or is not a directory.
-        """
-        path = Path(self.repo_path).resolve()
-        if not path.exists():
-            raise ValueError(f"Repository path does not exist: {path}")
-        if not path.is_dir():
-            raise ValueError(f"Repository path must be a directory: {path}")
-        return self
-
-
 class RepoLoader:
-    """Loader that reads a local repo's supported source files as documents.
+    """Reads a local repo's supported source files as documents.
 
     Args:
-        repo_path: Path to a local repository directory.
-
-    Attributes:
-        repo_root: Resolved absolute path of the repository.
-        stats: Counters updated while loading.
+        repo_path: Path of an existing local directory.
 
     Raises:
-        pydantic.ValidationError: If repo_path does not exist or is not a
-            directory.
-
-    Example:
-        >>> loader = RepoLoader("path/to/repo")
-        >>> result = loader.load()
-        >>> print(result.stats.files_read_success)
+        ValueError: If repo_path is not an existing directory.
     """
 
     def __init__(self, repo_path: str) -> None:
-        config = RepoConfig(repo_path=repo_path)
-        self.repo_root = Path(config.repo_path).resolve()
+        self.repo_root = Path(repo_path).resolve()
+        if not self.repo_root.is_dir():
+            raise ValueError(
+                f"Repository path is not an existing directory: "
+                f"{self.repo_root}"
+            )
         self.stats = IngestionStats()
 
     def scan_repository(self) -> list[Path]:
-        """Recursively discover supported files, skipping configured dirs.
+        """Return the repo's supported files, updating the scan counters.
 
-        Skip symlinks and paths resolving outside repo_root without counting
-        them, and update the scan counters in self.stats.
+        Skips SKIP_DIRECTORIES, symlinks, and paths resolving outside the repo.
 
         Returns:
-            Paths of files with a supported extension.
+            Paths of supported files, in sorted walk order.
         """
         files: list[Path] = []
 
         # followlinks=False never descends into a linked directory.
         for dirpath, dirnames, filenames in os.walk(self.repo_root):
-            # Pruned in place, so skipped trees (node_modules, .git) are
-            # never listed at all.
+            # Pruned in place, so skipped trees are never listed.
             dirnames[:] = sorted(
                 d for d in dirnames if d not in SKIP_DIRECTORIES
             )
             for name in sorted(filenames):
                 path = Path(dirpath, name)
-                # A repo can ship a link like leak.py -> /proc/self/environ
-                # that would embed the worker's secrets.
+                # e.g. leak.py -> /proc/self/environ would embed secrets.
                 if path.is_symlink() or not path.resolve().is_relative_to(
                     self.repo_root
                 ):
@@ -164,14 +75,13 @@ class RepoLoader:
         return files
 
     def build_file_document(self, file_path: Path) -> FileDocument | None:
-        """Create a validated FileDocument from a file path.
+        """Read one file into a FileDocument.
 
         Args:
-            file_path: Path of a supported file under repo_root.
+            file_path: A supported file under repo_root.
 
         Returns:
-            The FileDocument, or None if the file was too large or
-            unreadable.
+            The document, or None if the file is too large or unreadable.
         """
         content = read_file_safe(file_path)
 
@@ -184,18 +94,18 @@ class RepoLoader:
         return FileDocument(
             file_name=file_path.name,
             absolute_path=str(file_path),
-            relative_path=get_relative_path(self.repo_root, file_path),
+            relative_path=str(file_path.relative_to(self.repo_root)),
             extension=file_path.suffix.lower(),
             language=detect_language(file_path),
-            size_bytes=get_file_size(file_path),
+            size_bytes=file_path.stat().st_size,
             content=content,
         )
 
     def load(self) -> IngestionResult:
-        """Scan the repository and read every supported file.
+        """Scan the repo and read every supported file.
 
         Returns:
-            A validated IngestionResult containing documents and stats.
+            IngestionResult with the documents and stats.
         """
         documents = [
             doc
@@ -206,7 +116,12 @@ class RepoLoader:
         return IngestionResult(documents=documents, stats=self.stats)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Load HOST_REPO_PATH and log the stats (local debugging).
+
+    Raises:
+        ValueError: If HOST_REPO_PATH is not set.
+    """
     from utils.logging_config import configure_logging
 
     configure_logging()
@@ -219,3 +134,7 @@ if __name__ == "__main__":
     logger.info("Stats: %s", result.stats)
     if result.documents:
         logger.debug("Sample document: %s", result.documents[0])
+
+
+if __name__ == "__main__":
+    main()

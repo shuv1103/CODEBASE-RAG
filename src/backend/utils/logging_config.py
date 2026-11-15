@@ -1,13 +1,12 @@
-"""Root logging setup that shows extra={...} fields."""
+"""Root logging setup with service, request id and extra={...} fields."""
 
 import logging
 import time
 from contextvars import ContextVar
 
-from .config import settings
+from utils.config import settings
 
-# Set per HTTP request by RequestIdMiddleware; copied into asyncio tasks and
-# to_thread calls, so every log line of a request carries it.
+# Set per request by RequestIdMiddleware; inherited by tasks and threads.
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
 _RESERVED_LOG_RECORD_ATTRS = frozenset(
@@ -20,13 +19,10 @@ _RESERVED_LOG_RECORD_ATTRS = frozenset(
 
 
 class ContextFilter(logging.Filter):
-    """Stamp each record with the process's service name and request id.
-
-    The request id is only set inside an HTTP request, so it shows up as a
-    request_id=... extra field there and is absent elsewhere.
+    """Log filter that stamps each record with the service and request id.
 
     Args:
-        service: Process name shown on every line, such as "api".
+        service: Process name shown on every line, e.g. "api".
     """
 
     def __init__(self, service: str) -> None:
@@ -34,7 +30,14 @@ class ContextFilter(logging.Filter):
         self.service = service
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Add service and, inside a request, request_id to the record."""
+        """Add service and, inside an HTTP request, request_id to the record.
+
+        Args:
+            record: The record being logged.
+
+        Returns:
+            True, so the record is always emitted.
+        """
         record.service = self.service
         request_id = request_id_var.get()
         if request_id is not None:
@@ -43,21 +46,16 @@ class ContextFilter(logging.Filter):
 
 
 class ExtraFieldsFormatter(logging.Formatter):
-    """Log formatter that appends a record's extra={...} fields to the line.
-
-    The default formatter drops them, which hides fields such as
-    cache_event and repo_id that the logs are searched by.
-    """
+    """Log formatter that appends a record's extra={...} fields."""
 
     def format(self, record: logging.LogRecord) -> str:
-        """Render a record, appending any non-standard attributes as key=value.
+        """Render a record, appending its non-standard attributes.
 
         Args:
-            record: The log record to format.
+            record: The record to format.
 
         Returns:
-            The base formatted line, followed by " | key=value ..." when
-            the record carries extra fields.
+            The base line, plus " | key=value ..." when there are extra fields.
         """
         base = super().format(record)
         extras = {
@@ -76,18 +74,14 @@ class ExtraFieldsFormatter(logging.Formatter):
 def configure_logging(
     service: str = "cli", level: int | str | None = None
 ) -> None:
-    """Configure root logging so extra={...} fields are visible.
+    """Configure root logging; call once at a process entry point.
 
-    Call once at process start (the API app, the Celery worker or a CLI
-    entry point), never from library modules. Replace any handlers an
-    imported library already installed. Lines look like
-    "2026-10-26T12:00:00.123Z INFO [api] module: message | key=value".
+    Lines look like "2026-10-26T12:00:00.123Z INFO [api] module: msg | k=v".
+    Replaces any handlers a library installed and holds httpx at WARNING.
 
     Args:
-        service: Process name on every line, so the API and worker sharing
-            one container's stdout can be told apart.
-        level: Root logging level, as a logging constant or a name such as
-            "DEBUG". Defaults to settings.log_level (LOG_LEVEL, then "INFO").
+        service: Process name on every line ("api", "worker", "cli").
+        level: Logging level or name. Defaults to LOG_LEVEL.
     """
     if level is None:
         level = settings.log_level

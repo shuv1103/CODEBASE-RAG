@@ -57,6 +57,7 @@ dist/
 # Internal docs / notes - not for public repo
 references/
 graphify-out/
+.archify/
 CLAUDE.md
 
 # Editor / OS / local tooling
@@ -70,6 +71,12 @@ Thumbs.db
 # foglamp scan artifacts (scan.lock.json holds a secret edit token)
 .foglamp/
 
+# Hallmark design tooling state and its UI review screenshots
+.hallmark/
+src/frontend/src/artifacts/
+
 # scripts for local developement
 scripts/
+
+
 

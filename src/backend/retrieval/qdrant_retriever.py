@@ -6,30 +6,39 @@ from pathlib import PurePath
 from qdrant_client import models
 from qdrant_client.http.exceptions import UnexpectedResponse
 
-from embeddings.qdrant_store import get_qdrant_client, repo_filter
+from models.retrieval_models import RetrievalResponse, RetrievedChunk
+from storage.qdrant_store import get_qdrant_client, repo_filter
 from utils.config import settings
-
-from .retrieval_models import RetrievalResponse, RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
 
 class QdrantRetriever:
-    """Thin wrapper around Qdrant similarity search.
-
-    Searches keep QDRANT_HNSW_EF (default 128) candidates while walking the
-    HNSW graph, so filtering by repo_id doesn't drop true neighbours.
+    """Similarity search over the shared collection, filtered by repo_id.
 
     Args:
-        repo_id: Repository to search. None searches every repo in the
-            collection (used by local dev tooling and evaluation).
-        collection_name: Collection to query. Defaults to QDRANT_COLLECTION,
-            then "code_chunks".
+        repo_id: Repo to search; required unless all_repos is True.
+        collection_name: Defaults to QDRANT_COLLECTION.
+        all_repos: Search every repo unfiltered (adk web, evaluation only).
+
+    Raises:
+        ValueError: Unless exactly one of repo_id / all_repos is given.
     """
 
     def __init__(
-        self, repo_id: str | None = None, collection_name: str | None = None
+        self,
+        repo_id: str | None = None,
+        collection_name: str | None = None,
+        *,
+        all_repos: bool = False,
     ) -> None:
+        if all_repos and repo_id is not None:
+            raise ValueError("Pass either repo_id or all_repos=True, not both")
+        if not all_repos and not repo_id:
+            raise ValueError(
+                "repo_id is required (got an empty value); pass "
+                "all_repos=True to deliberately search every repo"
+            )
         self._client = get_qdrant_client()
         self._collection_name = collection_name or settings.qdrant_collection
         self._repo_id = repo_id
@@ -43,26 +52,26 @@ class QdrantRetriever:
         query_embedding: list[float],
         top_k: int,
     ) -> RetrievalResponse:
-        """Search Qdrant for the most relevant code chunks.
+        """Return the chunks nearest to a query embedding.
 
-        A missing collection (nothing ingested yet) yields an empty result,
-        not an error.
+        A missing collection (nothing ingested yet) returns no results.
 
         Args:
-            query: Original query text, echoed back in the response.
-            query_embedding: Embedding vector of the query.
-            top_k: Maximum number of chunks to return.
+            query: Original query text, echoed in the response.
+            query_embedding: The query's embedding vector.
+            top_k: Most chunks to return.
 
         Returns:
-            RetrievalResponse with chunks ordered by cosine similarity,
-            highest first.
+            RetrievalResponse ordered by cosine similarity, highest first.
         """
         try:
             response = self._client.query_points(
                 collection_name=self._collection_name,
                 query=query_embedding,
                 query_filter=(
-                    repo_filter(self._repo_id) if self._repo_id else None
+                    None
+                    if self._repo_id is None
+                    else repo_filter(self._repo_id)
                 ),
                 limit=top_k,
                 search_params=self._search_params,
@@ -74,21 +83,19 @@ class QdrantRetriever:
                     "Qdrant collection %s not found; returning no results",
                     self._collection_name,
                 )
-                return RetrievalResponse(query=query, top_k=top_k, results=[])
+                return RetrievalResponse()
             raise
 
         return RetrievalResponse(
-            query=query,
-            top_k=top_k,
-            results=[self.to_chunk(point) for point in response.points],
+            results=[self.to_chunk(point) for point in response.points]
         )
 
     @staticmethod
     def to_chunk(point: models.ScoredPoint) -> RetrievedChunk:
-        """Convert one Qdrant search hit into a RetrievedChunk.
+        """Convert a Qdrant search hit into a RetrievedChunk.
 
         Args:
-            point: A scored point returned by query_points.
+            point: A scored point from query_points.
 
         Returns:
             The chunk, with missing payload fields defaulted.
@@ -102,11 +109,8 @@ class QdrantRetriever:
             file_name=payload.get("file_name") or PurePath(relative_path).name,
             language=payload.get("language") or "",
             chunk_type=payload.get("chunk_type") or "",
-            symbol_name=payload.get("symbol_name"),
-            parent_symbol=payload.get("parent_symbol"),
             start_line=payload.get("start_line"),
             end_line=payload.get("end_line"),
             content=payload.get("document"),
-            embedding_input_text=payload.get("document"),
             similarity_score=float(point.score),
         )

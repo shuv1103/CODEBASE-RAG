@@ -1,9 +1,7 @@
-"""Project configuration: static ingestion filters and typed runtime settings.
+"""Static ingestion filters and the typed, validated runtime settings.
 
-Every environment variable the app reads is declared once, on `Settings`,
-with its type, default and constraints. `settings` is built on first import,
-so a missing or malformed value fails the process at startup with a clear
-ValidationError rather than deep inside a request or ingestion task.
+`settings` is built on import, so a missing or invalid variable stops
+the process at startup with a ValidationError naming the field.
 """
 
 from typing import Annotated, Literal
@@ -22,28 +20,29 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-SUPPORTED_EXTENSIONS = frozenset(
-    {
-        ".py",
-        ".js",
-        ".ts",
-        ".jsx",
-        ".tsx",
-        ".java",
-        ".go",
-        ".rs",
-        ".c",
-        ".cpp",
-        ".h",
-        ".hpp",
-        ".cs",
-        ".dart",
-        ".html",
-        ".css",
-        ".md",
-        ".markdown",
-    }
-)
+# The single extension -> language table; add new languages here only.
+EXTENSION_LANGUAGE_MAP = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".jsx": "javascript",
+    ".tsx": "typescript",
+    ".java": "java",
+    ".go": "go",
+    ".rs": "rust",
+    ".c": "c",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".h": "c",
+    ".cs": "csharp",
+    ".dart": "dart",
+    ".html": "html",
+    ".css": "css",
+    ".md": "markdown",
+    ".markdown": "markdown",
+}
+
+SUPPORTED_EXTENSIONS = frozenset(EXTENSION_LANGUAGE_MAP)
 
 SKIP_DIRECTORIES = frozenset(
     {
@@ -97,19 +96,15 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
 class Settings(BaseSettings):
-    """Typed, validated view of every environment variable the app reads.
+    """Every environment variable the app reads, typed and validated.
 
-    Field names map case-insensitively to environment variables
-    (`openai_api_key` ← `OPENAI_API_KEY`). An empty variable counts as
-    unset, so it falls back to the default (or fails, if required).
-
-    OPENAI_API_KEY is required everywhere; everything else has a default.
-    Values only some processes need (AGENT_MODEL, CLI and evaluation paths)
-    are optional here and checked where they are used.
+    Field names map case-insensitively to env vars (openai_api_key <-
+    OPENAI_API_KEY); an empty variable counts as unset. Only OPENAI_API_KEY is
+    required everywhere; process-specific values are checked where used.
 
     Raises:
-        pydantic.ValidationError: On construction, if a required variable is
-            missing or any value has the wrong type or is out of range.
+        pydantic.ValidationError: On construction, if a value is missing or
+            invalid (values are hidden from the message).
 
     Example:
         >>> from utils.config import settings
@@ -117,16 +112,14 @@ class Settings(BaseSettings):
         5
     """
 
-    # Without hide_input_in_errors, a validation error logs every value read
-    # from the environment, API keys included.
+    # hide_input_in_errors keeps API keys out of validation errors.
     model_config = SettingsConfigDict(
         env_ignore_empty=True, extra="ignore", hide_input_in_errors=True
     )
 
     # --- OpenAI / models ---
     openai_api_key: SecretStr
-    # Required by the API and evaluation only (checked where the LLM is
-    # built); the worker and CLIs never call the LLM.
+    # Required only where the LLM runs (API, evaluation).
     agent_model: str | None = None
     embedding_model: str = "text-embedding-3-large"
     embedding_batch_size: PositiveInt = 20
@@ -176,8 +169,7 @@ class Settings(BaseSettings):
     max_repo_files: PositiveInt = 5000
     # Measured on the checked-out files.
     max_repo_bytes: PositiveInt = 200 * 1024 * 1024
-    # Whole-repo size GitHub reports (all history, packed), checked before
-    # cloning so a multi-GB repo is rejected without being downloaded.
+    # GitHub's packed repo size, checked before cloning.
     max_repo_download_bytes: PositiveInt = 1024 * 1024 * 1024
     # Caps embedding spend per repo.
     max_repo_chunks: PositiveInt = 20000
@@ -187,7 +179,6 @@ class Settings(BaseSettings):
     # --- API ---
     api_cors_origins: Annotated[list[str], NoDecode] = [
         "http://localhost:5173",
-        "",
     ]
     api_host: str = "0.0.0.0"
     api_port: int = Field(default=8000, ge=1, le=65535)
@@ -199,8 +190,7 @@ class Settings(BaseSettings):
     global_chat_rate_limit: str = "60/minute"
     global_create_repo_rate_limit: str = "20/hour"
     rate_limit_storage_uri: str = "memory://"
-    # Proxies in front of the API that append to X-Forwarded-For (Render: 1).
-    # 0 ignores the header and uses the TCP peer address.
+    # Proxies appending to X-Forwarded-For (Render: 1); 0 ignores the header.
     trusted_proxy_hops: NonNegativeInt = 0
     max_concurrent_llm_calls: PositiveInt = 4
     llm_queue_timeout_seconds: PositiveFloat = 30.0
@@ -226,11 +216,10 @@ class Settings(BaseSettings):
     @field_validator("api_cors_origins", mode="before")
     @classmethod
     def split_origins(cls, value: str | list[str]) -> list[str]:
-        """Parse a comma-separated origin list, dropping blanks.
+        """Parse API_CORS_ORIGINS from comma-separated text, dropping blanks.
 
         Args:
-            value: Raw env string (e.g. "https://a.app, https://b.app") or a
-                list.
+            value: Raw env string ("https://a.app, https://b.app") or a list.
 
         Returns:
             The stripped, non-empty origins.
@@ -241,7 +230,7 @@ class Settings(BaseSettings):
     @field_validator("log_level", mode="before")
     @classmethod
     def upper_log_level(cls, value: str) -> str:
-        """Accept a log level in any case ("debug" -> "DEBUG").
+        """Accept LOG_LEVEL in any case ("debug" -> "DEBUG").
 
         Args:
             value: Raw LOG_LEVEL value.
@@ -253,10 +242,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def default_celery_urls(self) -> "Settings":
-        """Point the Celery broker and result backend at REDIS_URL when unset.
+        """Point unset Celery broker and result backend URLs at REDIS_URL.
 
         Returns:
-            The settings with both Celery URLs filled in.
+            The settings, with both Celery URLs filled in.
         """
         self.celery_broker_url = self.celery_broker_url or self.redis_url
         self.celery_result_backend = (
@@ -266,58 +255,38 @@ class Settings(BaseSettings):
 
     @property
     def tracing_enabled(self) -> bool:
-        """Whether LangSmith tracing is on.
-
-        Needs LANGCHAIN_TRACING_V2 and an API key to both be set.
-        """
+        """Whether tracing is on: LANGCHAIN_TRACING_V2 plus an API key."""
         return self.langchain_tracing_v2 and bool(
             self.langchain_api_key.get_secret_value()
         )
 
     @property
     def ingestion_hard_time_limit_seconds(self) -> int:
-        """Celery hard time limit.
-
-        Backstop SIGKILL 60 s after the soft limit (INGESTION_TIMEOUT_SECONDS).
-        """
+        """Celery hard time limit: INGESTION_TIMEOUT_SECONDS + 60 s."""
         return self.ingestion_timeout_seconds + 60
 
     @property
     def celery_visibility_timeout_seconds(self) -> int:
-        """Broker visibility timeout.
+        """Broker visibility timeout: the hard limit + 30 min.
 
-        The solo pool ignores Celery's time limits, so a task stops only at
-        the pipeline's own timeout checks, which can overrun by one chunking
-        batch. The 30-minute margin covers that, so a running task is never
-        redelivered.
+        --pool=solo ignores time limits, so a run can overrun by a batch; the
+        margin keeps a running task from being redelivered.
         """
         return self.ingestion_hard_time_limit_seconds + 1800
 
     @property
     def ingestion_stale_after_seconds(self) -> int:
-        """Age after which a running ingestion is treated as abandoned.
-
-        A running ingestion writes progress after every chunking and
-        embedding batch, so a record silent this long has no live task (its
-        worker was killed, for example).
-        """
+        """Silence after which a running ingestion counts as abandoned."""
         return self.ingestion_hard_time_limit_seconds + 60
 
     @property
     def ingestion_pending_stale_after_seconds(self) -> int:
-        """Age after which a "pending" ingestion is treated as lost.
-
-        A queued task can wait behind several long ingestions, so only a
-        message lost from the broker should ever reach this.
-        """
+        """Age (24 h) after which a "pending" ingestion counts as lost."""
         return 24 * 3600
 
     @property
     def plaintext_remote_redis_urls(self) -> list[str]:
-        """Names of the Redis settings that reach a remote host without TLS.
-
-        That is, a redis:// URL whose host is not local.
-        """
+        """Names of Redis URL settings using redis:// to a non-local host."""
         urls = {
             "REDIS_URL": self.redis_url,
             "CELERY_BROKER_URL": self.celery_broker_url,
@@ -332,8 +301,7 @@ class Settings(BaseSettings):
         ]
 
 
-# LangSmith, LangChain and OpenAI clients read os.environ, not Settings.
-# Real environment variables keep priority over .env.
+# LangSmith/LangChain/OpenAI read os.environ; real env vars beat .env.
 load_dotenv()
 
 settings = Settings()

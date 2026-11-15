@@ -1,7 +1,4 @@
-"""FastAPI presentation layer: app, routes, schemas and core HTTP helpers.
+"""FastAPI layer: the app (api.main:app), routes, schemas and HTTP core.
 
-The app lives in api.main (served as `api.main:app`); importing it builds the
-app and its clients, so it is not re-exported here.
+Nothing is re-exported: import each module by its full path.
 """
-
-__all__: list[str] = []

@@ -1,12 +1,11 @@
-"""Workflow facade, per-repo agent registry and the API's singletons."""
+"""Workflow facade behind the API routes, and the API's singletons."""
 
 import asyncio
 import logging
-import threading
 import time
 import uuid
-from collections import OrderedDict
 from collections.abc import Callable
+from typing import NamedTuple
 
 from google.adk.agents.invocation_context import new_invocation_context_id
 from google.adk.events import Event
@@ -14,26 +13,28 @@ from google.adk.runners import InMemoryRunner
 from google.adk.sessions import Session
 from google.genai import types
 
-from caching.query_normalizer import normalize_query
-from caching.semantic_cache_repository import LangCacheRepository
-from caching.semantic_cache_service import SemanticCacheService
-from codebase_rag_agent.agent import build_agent
-from codebase_rag_agent.tools import CodebaseRetrievalTool
-from codebase_rag_agent.tracing import log_cache_event
-from retrieval.retrieval_service import RetrievalService
-from storage.redis_status_store import RedisStatusStore
-from storage.status_store import RepoStatus, StatusStore
-from utils.config import settings
-from utils.repo_id import compute_repo_id, normalize_github_url
-from worker.tasks import ingest_repo_task
-
-from .concurrency import LLMConcurrencyLimiter
-from .exceptions import (
+from api.core.agent_runtime import AgentRegistry, LLMConcurrencyLimiter
+from api.core.exceptions import (
     AgentResponseError,
     InvalidRepoUrlError,
     RepoNotFoundError,
     RepoNotReadyError,
 )
+from caching.semantic_cache_repository import (
+    CacheStrategy,
+    LangCacheRepository,
+)
+from caching.semantic_cache_service import (
+    CacheLookupResult,
+    SemanticCacheService,
+    normalize_query,
+)
+from codebase_rag_agent.tracing import log_cache_event
+from storage.redis_status_store import RedisStatusStore
+from storage.status_store import RepoStatus, RepoStatusValue, StatusStore
+from utils.config import settings
+from utils.repo_id import compute_repo_id, normalize_github_url
+from worker.tasks import ingest_repo_task
 
 logger = logging.getLogger(__name__)
 
@@ -47,134 +48,123 @@ _ENQUEUE_FAILED_ERROR = (
 
 _status_store: StatusStore = RedisStatusStore()
 
-# Listing a runner's sessions copies each one, so idle sessions are swept at
-# most this often per repo rather than on every chat turn.
-_SESSION_SWEEP_INTERVAL_SECONDS = 60
+
+class IngestionStart(NamedTuple):
+    """Result of RagWorkflowFacade.start_ingestion.
+
+    Attributes:
+        repo_id: 12-hex id derived from the normalized URL.
+        status: The repo's status after the call.
+        is_new: True if the caller must enqueue an ingestion.
+        normalized_url: Canonical https://github.com/<org>/<repo> URL.
+        attempt_id: Attempt id to pass to enqueue_ingestion.
+    """
+
+    repo_id: str
+    status: RepoStatusValue
+    is_new: bool
+    normalized_url: str
+    attempt_id: str | None
+
+
+class ChatTurn(NamedTuple):
+    """Result of RagWorkflowFacade.chat.
+
+    Attributes:
+        session_id: ADK session to send on the next turn.
+        answer: The answer text.
+        cache_hit: "exact" or "semantic" when the cache answered, else None.
+    """
+
+    session_id: str
+    answer: str
+    cache_hit: CacheStrategy | None
 
 
 def is_abandoned(record: RepoStatus) -> bool:
-    """Check whether an unfinished ingestion is past its staleness threshold.
+    """Check whether no live or queued task can still own an in-flight record.
 
     Args:
         record: The repo's status record.
 
     Returns:
-        True if no live or queued task can still own the record.
+        True if the record is in flight and past its staleness threshold.
     """
-    pending_threshold = settings.ingestion_pending_stale_after_seconds
     return record.is_abandoned(
         settings.ingestion_stale_after_seconds,
-        pending_stale_after_seconds=pending_threshold,
+        pending_stale_after_seconds=(
+            settings.ingestion_pending_stale_after_seconds
+        ),
     )
 
 
-def build_runner(repo_id: str) -> InMemoryRunner:
-    """Build an ADK runner whose retrieval is scoped to one repo's chunks.
+def event_text(event: Event) -> str:
+    """Return the text of an ADK event.
 
     Args:
-        repo_id: Repo whose chunks the agent's retrieval is scoped to.
+        event: A session or run event.
 
     Returns:
-        A new InMemoryRunner.
+        Its text parts joined, or "" when it has no text.
     """
-    retrieval_service = RetrievalService(repo_id=repo_id)
-    tool = CodebaseRetrievalTool(retrieval_service=retrieval_service)
-    return InMemoryRunner(agent=build_agent(tool))
+    if not event.content or not event.content.parts:
+        return ""
+    return "".join(part.text or "" for part in event.content.parts)
 
 
-class AgentRegistry:
-    """Bounded cache of one ADK runner per repo, built on first use.
+def previous_user_question(session: Session, message: str) -> str | None:
+    """Return the latest earlier user question that differs from message.
 
-    Each runner's retrieval is scoped to its repo, and reusing the runner
-    keeps that repo's chat history across turns. Runners and sessions live
-    in process memory, so only the max_repos most recently used runners are
-    kept and sessions idle past session_ttl_seconds are deleted. A deleted
-    session's id simply starts a new session.
+    Repeats of the same question are skipped, so a repeated follow-up finds
+    the cache key its first ask was stored under.
 
     Args:
-        max_repos: Most runners kept at once.
-        session_ttl_seconds: Idle time after which a session is deleted.
-        build_runner: Factory that builds a runner for a repo_id.
+        session: The chat's ADK session, before message is added.
+        message: The question being asked now.
+
+    Returns:
+        The previous question, or None on a session's first turn.
     """
+    # ponytail: one turn of context; key on more turns if answers drift.
+    same_question = normalize_query(message)
+    for event in reversed(session.events):
+        if event.author != "user":
+            continue
+        text = event_text(event)
+        if text and normalize_query(text) != same_question:
+            return text
+    return None
 
-    def __init__(
-        self,
-        max_repos: int = settings.agent_registry_max_repos,
-        session_ttl_seconds: int = settings.chat_session_ttl_seconds,
-        build_runner: Callable[[str], InMemoryRunner] = build_runner,
-    ) -> None:
-        self._lock = threading.Lock()
-        self._runners: OrderedDict[str, InMemoryRunner] = OrderedDict()
-        self._last_swept: dict[str, float] = {}
-        self._max_repos = max_repos
-        self._session_ttl_seconds = session_ttl_seconds
-        self._build_runner = build_runner
 
-    def get_runner(self, repo_id: str) -> InMemoryRunner:
-        """Return the repo's runner, building it on first use (thread-safe).
+def session_answers(session: Session) -> set[str]:
+    """Return every non-empty answer this session already received.
 
-        Mark the repo as most recently used and evict the least recently
-        used runner once more than max_repos are held.
+    Args:
+        session: The chat's ADK session.
 
-        Args:
-            repo_id: Repo whose chunks the agent's retrieval is scoped to.
+    Returns:
+        The texts of all non-user events.
+    """
+    return {
+        text
+        for event in session.events
+        if event.author != "user" and (text := event_text(event))
+    }
 
-        Returns:
-            The cached InMemoryRunner for the repo.
-        """
-        with self._lock:
-            runner = self._runners.get(repo_id)
-            if runner is not None:
-                self._runners.move_to_end(repo_id)
-                return runner
 
-        # Built outside the lock: building creates network clients, and
-        # holding the lock would stall every other repo's lookup.
-        # ponytail: two first chats for one repo may both build; one wins.
-        built = self._build_runner(repo_id)
-        with self._lock:
-            runner = self._runners.setdefault(repo_id, built)
-            self._runners.move_to_end(repo_id)
+def latest_answer(session: Session) -> str:
+    """Return the last answer this session received.
 
-            while len(self._runners) > self._max_repos:
-                evicted_repo_id, _ = self._runners.popitem(last=False)
-                self._last_swept.pop(evicted_repo_id, None)
-                logger.info(
-                    "Evicted idle chat agent for repo %s", evicted_repo_id
-                )
-            return runner
+    Args:
+        session: The chat's ADK session.
 
-    async def expire_idle_sessions(
-        self, repo_id: str, runner: InMemoryRunner, user_id: str
-    ) -> None:
-        """Delete the repo's sessions that have been idle past the TTL.
-
-        Skip the sweep if this repo was swept within the last
-        _SESSION_SWEEP_INTERVAL_SECONDS.
-
-        Args:
-            repo_id: Repo the runner belongs to.
-            runner: The repo's runner.
-            user_id: ADK user id the repo's sessions are stored under.
-        """
-        now = time.time()
-        if (
-            now - self._last_swept.get(repo_id, 0.0)
-            < _SESSION_SWEEP_INTERVAL_SECONDS
-        ):
-            return
-        self._last_swept[repo_id] = now
-
-        listed = await runner.session_service.list_sessions(
-            app_name=runner.app_name, user_id=user_id
-        )
-        for session in listed.sessions:
-            if now - session.last_update_time > self._session_ttl_seconds:
-                await runner.session_service.delete_session(
-                    app_name=runner.app_name,
-                    user_id=user_id,
-                    session_id=session.id,
-                )
+    Returns:
+        The text of the latest non-user event, or "" if there is none.
+    """
+    for event in reversed(session.events):
+        if event.author != "user" and (text := event_text(event)):
+            return text
+    return ""
 
 
 _agent_registry = AgentRegistry()
@@ -185,9 +175,9 @@ class RagWorkflowFacade:
     """Single entry point the API routes use for ingest, status and chat.
 
     Args:
-        status_store: Store for repo ingestion status.
-        agent_registry: Per-repo agent/runner cache.
-        semantic_cache_service: Two-tier answer cache.
+        status_store: Store of repo ingestion status records.
+        agent_registry: Per-repo cache of ADK runners.
+        semantic_cache_service: Answer cache consulted before the agent.
     """
 
     def __init__(
@@ -206,30 +196,24 @@ class RagWorkflowFacade:
         url: str,
         admit_new_work: Callable[[], None] | None = None,
         force: bool = False,
-    ) -> tuple[str, str, bool, str, str | None]:
-        """Validate the URL and create or reuse the repo's status record.
+    ) -> IngestionStart:
+        """Create the repo's status record, or reset a failed one for retry.
 
-        Dedup is one atomic create_if_absent() call, so two concurrent
-        requests for the same new repo can't both enqueue it. A failed or
-        abandoned repo is reset to "pending", with its cached answers
-        dropped, so it can be retried; the reset is a compare-and-set on the
-        attempt id, so of two concurrent retries only one starts.
+        Dedup and the retry reset are atomic, so concurrent requests for one
+        repo start at most one ingestion. A reset also drops the repo's cached
+        answers.
 
         Args:
             url: User-supplied GitHub repository URL.
-            admit_new_work: Called only when this request would start an
-                ingestion; raises to refuse it (e.g. the global cap).
-            force: Re-ingest a "ready" repo too (an operator action, e.g.
-                after a change to stored chunk data).
+            admit_new_work: Called only when this request would start work;
+                raises to refuse it (the global ingestion cap).
+            force: Also re-ingest a "ready" repo (operator action).
 
         Returns:
-            (repo_id, status, is_new, normalized_url, attempt_id).
-            is_new=False means the repo is already in flight or ready, so
-            the caller must not enqueue another ingestion. attempt_id is the
-            attempt to pass to enqueue_ingestion when is_new is True.
+            IngestionStart; enqueue an ingestion only when is_new is True.
 
         Raises:
-            InvalidRepoUrlError: If the URL is not a github.com repo URL.
+            InvalidRepoUrlError: If url is not a github.com repository URL.
         """
         try:
             normalized_url = normalize_github_url(url)
@@ -256,12 +240,13 @@ class RagWorkflowFacade:
         )
 
         if created:
-            return repo_id, "pending", True, normalized_url, record.attempt_id
+            return IngestionStart(
+                repo_id, "pending", True, normalized_url, record.attempt_id
+            )
 
         if needs_work(record):
+            # A new attempt_id turns any still-queued old task into a no-op.
             new_attempt_id = uuid.uuid4().hex
-            # The new attempt_id turns any still-queued task for the old
-            # attempt into a no-op.
             if self._status_store.update_if_attempt(
                 repo_id,
                 record.attempt_id,
@@ -269,27 +254,28 @@ class RagWorkflowFacade:
                 error=None,
                 attempt_id=new_attempt_id,
             ):
-                # A retry re-ingests from scratch, so answers cached from
-                # the old data must go.
+                # Answers cached from the old index must not survive.
                 self._semantic_cache_service.invalidate(repo_id)
-                return repo_id, "pending", True, normalized_url, new_attempt_id
+                return IngestionStart(
+                    repo_id, "pending", True, normalized_url, new_attempt_id
+                )
             # A concurrent request reset the record first; report its state.
             record = self._status_store.get(repo_id) or record
 
-        return repo_id, record.status, False, normalized_url, record.attempt_id
+        return IngestionStart(
+            repo_id, record.status, False, normalized_url, record.attempt_id
+        )
 
     def enqueue_ingestion(
         self, repo_id: str, source_url: str, attempt_id: str | None
     ) -> None:
-        """Queue the repo for ingestion by a Celery worker.
-
-        The task carries the attempt_id, so a superseded or duplicate
-        delivery skips itself.
+        """Queue the repo's ingestion task for a Celery worker.
 
         Args:
             repo_id: Repo to ingest.
             source_url: Normalized repository URL to clone.
-            attempt_id: Attempt returned by start_ingestion.
+            attempt_id: Attempt id from start_ingestion; a stale task skips
+                itself.
 
         Raises:
             Exception: Whatever the broker raised, after the record is failed.
@@ -307,20 +293,16 @@ class RagWorkflowFacade:
             raise
 
     def get_status(self, repo_id: str) -> RepoStatus:
-        """Return a repo's status record, failing an abandoned ingestion.
-
-        A record still in flight long after any task could be running (its
-        worker was killed, or the task was lost on a restart) is marked
-        failed, so the frontend stops polling and a re-submit retries it.
+        """Return a repo's status record, failing an abandoned ingestion first.
 
         Args:
             repo_id: Repo to look up.
 
         Returns:
-            The status record.
+            The current RepoStatus.
 
         Raises:
-            RepoNotFoundError: If the repo_id is unknown.
+            RepoNotFoundError: If repo_id has no record.
         """
         record = self._status_store.get(repo_id)
         if record is None:
@@ -332,54 +314,56 @@ class RagWorkflowFacade:
                 repo_id,
                 record.status,
             )
-            # Conditional, so a retry that started meanwhile is not failed.
-            # A fresh attempt_id cuts off the old run if it is in fact still
-            # alive: its next status write no longer matches.
-            failed_fields = {
-                "status": "failed",
-                "error": _ABANDONED_ERROR,
-                "attempt_id": uuid.uuid4().hex,
-            }
+            # Conditional, so a retry that started meanwhile survives; the
+            # new attempt_id stops the old run if it is somehow still alive.
+            new_attempt_id = uuid.uuid4().hex
             if self._status_store.update_if_attempt(
-                repo_id, record.attempt_id, **failed_fields
+                repo_id,
+                record.attempt_id,
+                status="failed",
+                error=_ABANDONED_ERROR,
+                attempt_id=new_attempt_id,
             ):
-                record = record.model_copy(update=failed_fields)
+                record = record.model_copy(
+                    update={
+                        "status": "failed",
+                        "error": _ABANDONED_ERROR,
+                        "attempt_id": new_attempt_id,
+                    }
+                )
             else:
                 record = self._status_store.get(repo_id) or record
         return record
 
     async def chat(
         self, repo_id: str, message: str, session_id: str | None
-    ) -> tuple[str, str, str | None]:
-        """Answer a question about a ready repo, consulting the cache first.
+    ) -> ChatTurn:
+        """Answer a question about a ready repo, from the cache when possible.
 
-        On a hit, append the cached turn to the session so later turns see
-        it; on a miss, run the agent and cache its answer. Every turn uses
-        the cache; a follow-up matches only other follow-ups.
+        A cache hit is appended to the session; a miss runs the agent and
+        caches its answer.
 
         Args:
-            repo_id: Repo to chat about.
+            repo_id: Repo to chat about; must be "ready".
             message: The user's question.
-            session_id: Existing ADK session to continue, or None to create
-                one (an unknown id also creates a new session).
+            session_id: Session to continue; None or an unknown id starts one.
 
         Returns:
-            (session_id, answer, cache_hit): cache_hit is "exact" or
-            "semantic" when the cache answered, None when the agent did.
+            ChatTurn with the session id, the answer and the cache tier used.
 
         Raises:
-            RepoNotFoundError: If the repo_id is unknown.
-            RepoNotReadyError: If the repo is not "ready".
+            RepoNotFoundError: If repo_id has no record.
+            RepoNotReadyError: If the repo has never been "ready".
             AgentResponseError: If the agent produced no final answer.
             LLMBusyError: If no LLM slot freed up in time.
         """
-        # Sync Redis call: on the event loop it would stall every request.
+        # Redis and client setup are blocking; keep them off the event loop.
         record = await asyncio.to_thread(self.get_status, repo_id)
-        if record.status != "ready":
+        # A re-ingest keeps the old index until it succeeds (delete_stale), so
+        # a repo that was ready once stays chattable while one runs or fails.
+        if record.status != "ready" and record.ready_at is None:
             raise RepoNotReadyError(repo_id, record.status)
 
-        # Building a runner creates OpenAI and Qdrant clients; keep that off
-        # the event loop.
         runner = await asyncio.to_thread(
             self._agent_registry.get_runner, repo_id
         )
@@ -387,55 +371,14 @@ class RagWorkflowFacade:
         await self._agent_registry.expire_idle_sessions(
             repo_id, runner, user_id
         )
+        session = await self.get_or_create_session(runner, user_id, session_id)
 
-        session = None
-        if session_id:
-            session = await runner.session_service.get_session(
-                app_name=runner.app_name,
-                user_id=user_id,
-                session_id=session_id,
-            )
-
-        if session is None:
-            session = await runner.session_service.create_session(
-                app_name=runner.app_name, user_id=user_id
-            )
-
-        # The cache is shared by all users, and a follow-up's answer can
-        # depend on the conversation; the cache service keys a follow-up by
-        # this previous question too, apart from first-turn entries. Earlier
-        # asks of this same question are skipped, so a repeat looks up the
-        # key its first ask was stored under.
-        # ponytail: one turn of context; key on more turns if answers drift.
-        same_question = normalize_query(message).casefold()
-        previous_question = next(
-            (
-                event.content.parts[0].text
-                for event in reversed(session.events)
-                if event.author == "user"
-                and event.content
-                and event.content.parts
-                and event.content.parts[0].text
-                and normalize_query(event.content.parts[0].text).casefold()
-                != same_question
-            ),
-            None,
-        )
+        previous_question = previous_user_question(session, message)
+        previous_answer = latest_answer(session)
         turn = "first" if previous_question is None else "followup"
 
-        # Cache calls are sync network I/O; keep them off the event loop.
-        cache_result = await asyncio.to_thread(
-            self._semantic_cache_service.lookup,
-            repo_id,
-            message,
-            previous_question,
-        )
-        await asyncio.to_thread(
-            log_cache_event,
-            repo_id,
-            cache_result.outcome,
-            message,
-            cache_result.nearest_similarity,
+        cache_result = await self.lookup_cached_answer(
+            repo_id, message, session, previous_question, previous_answer
         )
         if cache_result.answer is not None:
             await self.append_cached_turn_to_session(
@@ -449,38 +392,16 @@ class RagWorkflowFacade:
                     "outcome": cache_result.outcome,
                 },
             )
-            return (
+            return ChatTurn(
                 session.id,
                 cache_result.answer,
                 cache_result.outcome.removesuffix("_hit"),
             )
 
-        # Only cache misses reach the LLM, so only they take a concurrency slot.
-        answer = ""
         started = time.perf_counter()
-        async with self._llm_concurrency.slot():
-            async for event in runner.run_async(
-                user_id=user_id,
-                session_id=session.id,
-                new_message=types.Content(
-                    role="user", parts=[types.Part(text=message)]
-                ),
-            ):
-                if (
-                    event.is_final_response()
-                    and event.content
-                    and event.content.parts
-                ):
-                    answer = "".join(
-                        part.text
-                        for part in event.content.parts
-                        if getattr(part, "text", None)
-                    )
-
+        answer = await self.run_agent(runner, user_id, session.id, message)
         # Includes waiting for a concurrency slot, as the user experiences it.
         agent_ms = round((time.perf_counter() - started) * 1000)
-        if not answer:
-            raise AgentResponseError("Agent did not produce a response")
 
         await asyncio.to_thread(
             self._semantic_cache_service.store,
@@ -488,6 +409,7 @@ class RagWorkflowFacade:
             message,
             answer,
             previous_question,
+            previous_answer=previous_answer,
         )
         logger.info(
             "Chat turn answered by agent",
@@ -499,7 +421,125 @@ class RagWorkflowFacade:
             },
         )
 
-        return session.id, answer, None
+        return ChatTurn(session.id, answer, None)
+
+    @staticmethod
+    async def get_or_create_session(
+        runner: InMemoryRunner, user_id: str, session_id: str | None
+    ) -> Session:
+        """Return the session to continue, or a new one.
+
+        Args:
+            runner: The repo's runner.
+            user_id: ADK user id the repo's sessions are stored under.
+            session_id: Session to continue; None or an unknown id starts one.
+
+        Returns:
+            The existing or newly created Session.
+        """
+        session = None
+        if session_id:
+            session = await runner.session_service.get_session(
+                app_name=runner.app_name,
+                user_id=user_id,
+                session_id=session_id,
+            )
+        if session is None:
+            if session_id:
+                # Evicted runner or expired session: this turn loses context.
+                logger.warning(
+                    "Chat session %r not found; starting a new one",
+                    session_id,
+                    extra={"user_id": user_id},
+                )
+            session = await runner.session_service.create_session(
+                app_name=runner.app_name, user_id=user_id
+            )
+        return session
+
+    async def lookup_cached_answer(
+        self,
+        repo_id: str,
+        message: str,
+        session: Session,
+        previous_question: str | None,
+        previous_answer: str,
+    ) -> CacheLookupResult:
+        """Look the turn up in the answer cache and trace the outcome.
+
+        A follow-up that misses is retried as a first turn; that answer is used
+        only if this session already received it (a rephrased question).
+
+        Args:
+            repo_id: Repo the chat is about.
+            message: The user's question.
+            session: The chat's session, before message is added.
+            previous_question: The previous question, or None on a first turn.
+            previous_answer: The answer the session last received.
+
+        Returns:
+            CacheLookupResult; its answer is None on a miss.
+        """
+        cache_result = await asyncio.to_thread(
+            self._semantic_cache_service.lookup,
+            repo_id,
+            message,
+            previous_question,
+            previous_answer=previous_answer,
+        )
+        if cache_result.answer is None and previous_question is not None:
+            rephrase = await asyncio.to_thread(
+                self._semantic_cache_service.lookup, repo_id, message
+            )
+            if rephrase.answer is not None and rephrase.answer in (
+                session_answers(session)
+            ):
+                cache_result = rephrase
+        await asyncio.to_thread(
+            log_cache_event,
+            repo_id,
+            cache_result.outcome,
+            message,
+            cache_result.nearest_similarity,
+        )
+        return cache_result
+
+    async def run_agent(
+        self,
+        runner: InMemoryRunner,
+        user_id: str,
+        session_id: str,
+        message: str,
+    ) -> str:
+        """Run one agent turn inside an LLM concurrency slot.
+
+        Args:
+            runner: The repo's runner.
+            user_id: ADK user id the session is stored under.
+            session_id: Session the turn is appended to.
+            message: The user's question.
+
+        Returns:
+            The agent's final answer text.
+
+        Raises:
+            AgentResponseError: If the agent produced no final answer.
+            LLMBusyError: If no LLM slot freed up in time.
+        """
+        answer = ""
+        async with self._llm_concurrency.slot():
+            async for event in runner.run_async(
+                user_id=user_id,
+                session_id=session_id,
+                new_message=types.Content(
+                    role="user", parts=[types.Part(text=message)]
+                ),
+            ):
+                if event.is_final_response() and (text := event_text(event)):
+                    answer = text
+        if not answer:
+            raise AgentResponseError("Agent did not produce a response")
+        return answer
 
     async def append_cached_turn_to_session(
         self,
@@ -508,19 +548,14 @@ class RagWorkflowFacade:
         message: str,
         answer: str,
     ) -> None:
-        """Record a cache-served turn in the ADK session history.
-
-        Append a user event and an agent-authored model event under one
-        fresh invocation id, mirroring what a real turn leaves behind.
+        """Record a cache-served turn in the session, as an agent turn would.
 
         Args:
-            runner: The repo's runner (provides the session service and
-                agent name).
-            session: Session to append to.
+            runner: The repo's runner (session service and agent name).
+            session: Session to append the user and answer events to.
             message: The user's question.
             answer: The cached answer.
         """
-        # A cache hit skips run_async, which normally records the turn.
         invocation_id = new_invocation_context_id()
         user_event = Event(
             invocation_id=invocation_id,
@@ -550,9 +585,5 @@ _rag_workflow = RagWorkflowFacade(
 
 
 def get_rag_workflow() -> RagWorkflowFacade:
-    """Return the process-wide workflow facade (a FastAPI dependency).
-
-    Returns:
-        The singleton RagWorkflowFacade.
-    """
+    """Return the process-wide workflow facade (a FastAPI dependency)."""
     return _rag_workflow

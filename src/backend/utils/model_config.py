@@ -2,42 +2,35 @@
 
 from google.adk.models.lite_llm import LiteLlm
 
-from .config import settings
+from utils.config import settings
 
 
 def litellm_model_name(model: str) -> str:
-    """Build a litellm-style '<provider>/<model>' identifier.
-
-    Every model in this project (agent + embeddings) is served via OpenAI.
+    """Build the litellm id for an OpenAI model.
 
     Args:
-        model: OpenAI model name, e.g. settings.agent_model.
+        model: OpenAI model name, e.g. "gpt-4o-mini".
 
     Returns:
-        The identifier "openai/<model>".
-
-    Example:
-        >>> litellm_model_name("gpt-4o-mini")
-        'openai/gpt-4o-mini'
+        "openai/<model>".
     """
     return f"openai/{model}"
 
 
 def build_llm_model(model: str | None) -> LiteLlm:
-    """Build a ready-to-use LiteLlm model instance.
+    """Build the agent's LiteLlm model.
 
-    The model retries itself LLM_NUM_RETRIES times (default 3): LiteLLM
-    backs off exponentially on a 429 and retries other API errors at once.
-    The agent run streams events, so ExponentialBackoff can't wrap it.
+    LiteLLM retries itself LLM_NUM_RETRIES times, since the agent's streamed
+    run can't be wrapped by ExponentialBackoff.
 
     Args:
-        model: OpenAI model name, e.g. settings.agent_model.
+        model: OpenAI model name (AGENT_MODEL).
 
     Returns:
-        A LiteLlm configured with the resolved "openai/<model>" identifier.
+        A LiteLlm for "openai/<model>".
 
     Raises:
-        ValueError: If model is unset (AGENT_MODEL missing).
+        ValueError: If model is unset.
     """
     if not model:
         raise ValueError("AGENT_MODEL is required to build the agent's LLM")

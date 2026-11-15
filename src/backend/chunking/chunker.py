@@ -1,7 +1,9 @@
-"""AST-based code chunker that runs chonkie in a subprocess pool."""
+"""AST code chunking with chonkie, run in a crash-isolated subprocess."""
 
+import bisect
 import functools
 import logging
+import re
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -11,22 +13,19 @@ from typing import TYPE_CHECKING, Any
 from billiard.exceptions import WorkerLostError
 from billiard.pool import ApplyResult, Pool
 
-from ingestion.repo_loader import FileDocument, IngestionResult
-from utils.iter_utils import batchify
-
-from .chunk_config import (
-    AST_LANGUAGE_ALIASES,
-    AST_SUPPORTED_LANGUAGES,
+from chunking.chunk_config import (
     DEFAULT_CHUNK_BATCH_SIZE,
     DEFAULT_CODE_CHUNK_SIZE,
     DEFAULT_CODE_CHUNK_TOKENIZER,
 )
-from .chunk_models import (
+from models.chunk_models import (
     ChunkingResult,
     ChunkingStats,
     ChunkMetadata,
     CodeChunk,
 )
+from models.ingestion_models import FileDocument, IngestionResult
+from utils.iter_utils import batchify
 
 if TYPE_CHECKING:
     from chonkie import CodeChunker
@@ -36,8 +35,7 @@ logger = logging.getLogger(__name__)
 PER_FILE_TIMEOUT_SECONDS = 30
 _POOL_POLL_INTERVAL_SECONDS = 0.05
 
-# One chunk as pickled back from the worker subprocess:
-# {"text", "start_byte", "end_byte", "token_count"}.
+# A chunk as pickled back from the worker: text, byte offsets, tokens.
 RawChunk = dict[str, Any]
 
 
@@ -46,15 +44,13 @@ class ChunkRun:
     """State shared by every batch of one ASTCodeChunker.chunk() call.
 
     Attributes:
-        repo_id: Repository id to stamp on each chunk.
-        source_url: Repository URL to stamp on each chunk.
-        stats: Run stats, updated in place.
+        repo_id: Stamped on each chunk.
+        stats: Run counters, updated in place.
         pool: Single-worker pool; replaced when its worker crashes or hangs.
         chunks: Every chunk produced so far.
     """
 
     repo_id: str
-    source_url: str
     stats: ChunkingStats
     pool: Pool
     chunks: list[CodeChunk] = field(default_factory=list)
@@ -64,15 +60,15 @@ class ChunkRun:
 def get_chunker(
     language: str, chunk_size: int, tokenizer: str
 ) -> "CodeChunker":
-    """Return a cached chonkie.CodeChunker, creating it on first use.
+    """Return a cached chonkie CodeChunker, built on first use.
 
     Args:
-        language: Normalized language name.
+        language: chonkie language name, e.g. "python".
         chunk_size: Maximum chunk size, in tokenizer units.
-        tokenizer: chonkie tokenizer name (e.g. "character").
+        tokenizer: chonkie tokenizer name, e.g. "character".
 
     Returns:
-        The CodeChunker cached for (language, chunk_size, tokenizer).
+        The CodeChunker for these settings.
     """
     from chonkie import CodeChunker
 
@@ -87,18 +83,16 @@ def chunkify_batch_in_subprocess(
     chunk_size: int,
     tokenizer: str,
 ) -> list[list[RawChunk]]:
-    """Run chonkie's CodeChunker.chunk_batch() in a subprocess.
-
-    Return plain dicts, which pickle back to the parent process.
+    """Chunk same-language files with chonkie; runs in the worker process.
 
     Args:
-        contents: Source text of each file in the batch.
-        normalized_language: Normalized language shared by the batch.
+        contents: Source text of each file.
+        normalized_language: chonkie language shared by the batch.
         chunk_size: Maximum chunk size, in tokenizer units.
         tokenizer: chonkie tokenizer name.
 
     Returns:
-        One list per input file of {"text", "start_byte", "end_byte",
+        Per file, a list of picklable {"text", "start_byte", "end_byte",
         "token_count"} dicts.
     """
     chunker = get_chunker(normalized_language, chunk_size, tokenizer)
@@ -123,18 +117,16 @@ def chunkify_in_subprocess(
     chunk_size: int,
     tokenizer: str,
 ) -> list[RawChunk]:
-    """Chunk a single file, expressed as a batch of one.
-
-    Module-level so it can be pickled and sent to the subprocess.
+    """Chunk one file in the worker process (a batch of one).
 
     Args:
         content: Source text of the file.
-        normalized_language: Normalized language of the file.
+        normalized_language: chonkie language of the file.
         chunk_size: Maximum chunk size, in tokenizer units.
         tokenizer: chonkie tokenizer name.
 
     Returns:
-        List of {"text", "start_byte", "end_byte", "token_count"} dicts.
+        The file's {"text", "start_byte", "end_byte", "token_count"} dicts.
     """
     return chunkify_batch_in_subprocess(
         [content], normalized_language, chunk_size, tokenizer
@@ -146,9 +138,6 @@ def get_result_fast(
 ) -> Any:
     """Wait for a pool result, failing fast if the worker dies or hangs.
 
-    Poll rather than block on get(), so a native crash in the worker is
-    caught at once instead of after the full timeout.
-
     Args:
         pool: Single-worker pool running the job.
         async_result: Pending result from pool.apply_async.
@@ -158,13 +147,15 @@ def get_result_fast(
         The job's return value.
 
     Raises:
-        WorkerLostError: If the pool's worker process has died.
-        TimeoutError: If hard_timeout elapses first.
+        WorkerLostError: If the worker process died.
+        TimeoutError: If hard_timeout elapsed first.
     """
     start = time.monotonic()
     while True:
         if async_result.ready():
             return async_result.get()
+        # billiard (pinned 4.3.0) has no public worker handle; a test fails
+        # if _pool disappears in an upgrade.
         worker = pool._pool[0] if pool._pool else None
         if worker is not None and not worker.is_alive():
             raise WorkerLostError(
@@ -178,26 +169,19 @@ def get_result_fast(
 
 
 class ASTCodeChunker:
-    """AST-based chunker for the languages in AST_SUPPORTED_LANGUAGES.
+    """Chunks source files by AST in a single-worker subprocess pool.
 
-    Files are chunked in same-language batches inside a single-worker
-    subprocess pool, so a native tree-sitter crash kills only the worker,
-    not the caller.
+    A native tree-sitter crash kills only the worker: the file is skipped
+    and counted in stats.failed_files.
 
     Args:
-        chunk_size: Maximum chunk size, in tokenizer units.
-        tokenizer: chonkie tokenizer name.
-        batch_size: Same-language files sent per subprocess call.
-
-    Attributes:
-        chunk_size: Configured maximum chunk size.
-        tokenizer: Configured tokenizer name.
-        batch_size: Configured batch size.
+        chunk_size: Maximum chunk size, in tokenizer units (default 2300).
+        tokenizer: chonkie tokenizer name (default "character").
+        batch_size: Same-language files per subprocess call (default 20).
 
     Example:
-        >>> chunker = ASTCodeChunker()
-        >>> result = chunker.chunk(RepoLoader("path/to/repo").load())
-        >>> print(result.stats.total_chunks_created)
+        >>> result = ASTCodeChunker().chunk(RepoLoader("repo").load())
+        >>> result.stats.total_chunks_created
     """
 
     def __init__(
@@ -210,37 +194,8 @@ class ASTCodeChunker:
         self.tokenizer = tokenizer
         self.batch_size = batch_size
 
-    def normalize_language(self, document: FileDocument) -> str | None:
-        """Map a document's language to its chonkie language name.
-
-        Args:
-            document: The loaded file.
-
-        Returns:
-            The normalized language, or None if it has no AST alias.
-        """
-        language = (document.language or "").strip().lower()
-        return AST_LANGUAGE_ALIASES.get(language)
-
-    def update_language_distribution(
-        self, stats: ChunkingStats, language: str
-    ) -> None:
-        """Increment the per-language document count.
-
-        Args:
-            stats: Stats object to update in place.
-            language: Detected language of a document.
-        """
-        stats.language_distribution[language] = (
-            stats.language_distribution.get(language, 0) + 1
-        )
-
     def new_pool(self) -> Pool:
-        """Create a single-worker billiard.Pool for chunking one repo.
-
-        Returns:
-            A new Pool with one worker process.
-        """
+        """Return a new single-worker billiard Pool."""
         return Pool(processes=1)
 
     def build_code_chunks(
@@ -248,24 +203,23 @@ class ASTCodeChunker:
         document: FileDocument,
         raw_chunks: list[RawChunk],
         repo_id: str,
-        source_url: str,
     ) -> list[CodeChunk]:
-        """Build CodeChunk objects from raw chunk data.
+        """Build CodeChunks from a file's raw chonkie chunks.
 
-        Derive 1-based, inclusive line numbers from chonkie's byte offsets
-        into the UTF-8 content.
+        Line numbers are 1-based and inclusive, derived from the byte offsets.
 
         Args:
             document: The file the chunks came from.
-            raw_chunks: Dicts produced by chunkify_batch_in_subprocess.
-            repo_id: Repository id to stamp on each chunk.
-            source_url: Repository URL to stamp on each chunk.
+            raw_chunks: Its {"text", "start_byte", "end_byte", "token_count"}
+                dicts.
+            repo_id: Stamped on each chunk.
 
         Returns:
             One CodeChunk per raw chunk, in order.
         """
         content_bytes = document.content.encode("utf-8")
-        total = len(raw_chunks)
+        # Newlines before an offset = its line - 1; found once, not per chunk.
+        newlines = [m.start() for m in re.finditer(b"\n", content_bytes)]
 
         return [
             CodeChunk(
@@ -273,25 +227,17 @@ class ASTCodeChunker:
                 metadata=ChunkMetadata(
                     chunk_id=f"{document.relative_path}::chunk::{idx}",
                     file_name=document.file_name,
-                    absolute_path=document.absolute_path,
                     relative_path=document.relative_path,
-                    extension=document.extension,
                     language=document.language,
-                    size_bytes=document.size_bytes,
-                    chunk_index=idx,
-                    total_chunks_in_file=total,
                     chunking_strategy="chonkie_ast",
-                    symbol_name=None,
-                    start_line=content_bytes[: raw["start_byte"]].count(b"\n")
+                    start_line=bisect.bisect_left(newlines, raw["start_byte"])
                     + 1,
-                    # The chunk's last byte, so a trailing newline doesn't
-                    # count as the start of another line.
-                    end_line=content_bytes[
-                        : max(raw["end_byte"] - 1, raw["start_byte"])
-                    ].count(b"\n")
+                    # Last byte, so a trailing newline isn't a new line.
+                    end_line=bisect.bisect_left(
+                        newlines, max(raw["end_byte"] - 1, raw["start_byte"])
+                    )
                     + 1,
                     repo_id=repo_id,
-                    source_url=source_url,
                     extra={"token_count": raw["token_count"]},
                 ),
             )
@@ -299,10 +245,10 @@ class ASTCodeChunker:
         ]
 
     def replace_pool(self, run: ChunkRun) -> None:
-        """Swap the run's pool for a fresh one after its worker crashed or hung.
+        """Terminate the run's pool and start a fresh one.
 
         Args:
-            run: The current chunking run.
+            run: The current run; its pool's worker crashed or hung.
         """
         run.pool.terminate()
         run.pool = self.new_pool()
@@ -310,12 +256,12 @@ class ASTCodeChunker:
     def chunk_single_document(
         self, document: FileDocument, normalized_language: str, run: ChunkRun
     ) -> list[CodeChunk]:
-        """Chunk one document in the run pool's worker subprocess.
+        """Chunk one file in the run pool's worker.
 
         Args:
             document: The file to chunk.
-            normalized_language: Normalized language of the file.
-            run: The current chunking run.
+            normalized_language: chonkie language of the file.
+            run: The current run.
 
         Returns:
             The file's chunks.
@@ -336,9 +282,7 @@ class ASTCodeChunker:
         raw_chunks = get_result_fast(
             run.pool, async_result, PER_FILE_TIMEOUT_SECONDS
         )
-        return self.build_code_chunks(
-            document, raw_chunks, run.repo_id, run.source_url
-        )
+        return self.build_code_chunks(document, raw_chunks, run.repo_id)
 
     def record_file_result(
         self,
@@ -346,12 +290,12 @@ class ASTCodeChunker:
         file_chunks: list[CodeChunk],
         run: ChunkRun,
     ) -> None:
-        """Add a file's chunks to the run's totals, if it produced any.
+        """Add a file's chunks to the run totals, if it produced any.
 
         Args:
-            document: The file that was chunked.
-            file_chunks: Chunks produced for the file.
-            run: The current chunking run.
+            document: The chunked file.
+            file_chunks: Its chunks.
+            run: The current run.
         """
         if not file_chunks:
             return
@@ -368,15 +312,12 @@ class ASTCodeChunker:
     def chunk_one_with_recovery(
         self, document: FileDocument, normalized_language: str, run: ChunkRun
     ) -> None:
-        """Chunk one file, recovering from crashes, hangs, and errors.
-
-        Count failures in run.stats.failed_files instead of raising them.
+        """Chunk one file, counting a crash, hang or error instead of raising.
 
         Args:
             document: The file to chunk.
-            normalized_language: Normalized language of the file.
-            run: The current chunking run; its pool is replaced if the
-                worker crashed or hung.
+            normalized_language: chonkie language of the file.
+            run: The current run; its pool is replaced after a crash or hang.
         """
         try:
             file_chunks = self.chunk_single_document(
@@ -389,8 +330,7 @@ class ASTCodeChunker:
             )
             self.replace_pool(run)
             return
-        # chonkie and tree-sitter can raise anything on a malformed file;
-        # one bad file must not fail the repo.
+        # chonkie can raise anything; one bad file must not fail the repo.
         except Exception as exc:  # noqa: BLE001
             run.stats.failed_files += 1
             logger.warning(
@@ -406,14 +346,13 @@ class ASTCodeChunker:
         run: ChunkRun,
         on_batch: Callable[[], None] | None,
     ) -> None:
-        """Chunk each file of a failed batch on its own, isolating bad files.
+        """Chunk a failed batch file by file, isolating the bad files.
 
         Args:
             batch: Same-language files whose batch call failed.
-            normalized_language: Normalized language shared by the batch.
-            run: The current chunking run.
-            on_batch: Called after each file, so a slow fallback still
-                reports progress and honours the timeout.
+            normalized_language: chonkie language of the batch.
+            run: The current run.
+            on_batch: Called after each file (progress, timeout checks).
         """
         for document in batch:
             self.chunk_one_with_recovery(document, normalized_language, run)
@@ -427,17 +366,13 @@ class ASTCodeChunker:
         run: ChunkRun,
         on_batch: Callable[[], None] | None = None,
     ) -> None:
-        """Chunk a same-language batch in one subprocess call.
-
-        If the batch fails, retry each file on its own to isolate the bad
-        ones, replacing the pool first if the worker crashed or hung.
+        """Chunk a same-language batch in one call; on failure, retry per file.
 
         Args:
             batch: Same-language files to chunk.
-            normalized_language: Normalized language shared by the batch.
-            run: The current chunking run.
-            on_batch: Called after each per-file retry, so a slow fallback
-                still reports progress and honours the timeout.
+            normalized_language: chonkie language of the batch.
+            run: The current run.
+            on_batch: Called after each per-file retry.
         """
         try:
             async_result = run.pool.apply_async(
@@ -452,12 +387,9 @@ class ASTCodeChunker:
             batched_raw = get_result_fast(
                 run.pool, async_result, PER_FILE_TIMEOUT_SECONDS * len(batch)
             )
-            # Build all chunks before recording any, so a mid-batch failure
-            # can't record files twice when they are retried one by one.
+            # Build all first, so a failure can't record files twice.
             batch_chunks = [
-                self.build_code_chunks(
-                    document, raw_chunks, run.repo_id, run.source_url
-                )
+                self.build_code_chunks(document, raw_chunks, run.repo_id)
                 for document, raw_chunks in zip(
                     batch, batched_raw, strict=True
                 )
@@ -470,8 +402,7 @@ class ASTCodeChunker:
                 batch, normalized_language, run, on_batch
             )
             return
-        # Any other failure leaves the worker usable; the per-file retries
-        # find (and count) the file that caused it.
+        # The worker is still usable; per-file retries find the bad file.
         except Exception as exc:  # noqa: BLE001
             log_batch_failure(batch, normalized_language, exc)
             self.retry_batch_per_file(
@@ -486,49 +417,32 @@ class ASTCodeChunker:
         self,
         ingestion_result: IngestionResult,
         repo_id: str = "",
-        source_url: str = "",
         on_batch: Callable[[], None] | None = None,
     ) -> ChunkingResult:
-        """Chunk every supported document in an ingestion result by its AST.
+        """Chunk every document, batched by language.
 
-        Skip and count documents in unsupported languages. Files that crash
-        or hang the parser are counted in stats.failed_files.
+        Crashing files are counted in stats.failed_files.
 
         Args:
             ingestion_result: Documents loaded by RepoLoader.
-            repo_id: Repository id to stamp on each chunk.
-            source_url: Repository URL to stamp on each chunk.
-            on_batch: Called after every batch, e.g. to report progress or
-                stop on a timeout by raising.
+            repo_id: Stamped on each chunk.
+            on_batch: Called after every batch; may raise to stop (timeout).
 
         Returns:
-            ChunkingResult with all chunks and run stats.
+            ChunkingResult with every chunk and the run stats.
         """
-        stats = ChunkingStats(
-            total_documents_received=len(ingestion_result.documents)
-        )
+        stats = ChunkingStats()
 
         documents_by_language: defaultdict[str, list[FileDocument]] = (
             defaultdict(list)
         )
+        # RepoLoader only loads EXTENSION_LANGUAGE_MAP languages, whose names
+        # are chonkie's too.
         for document in ingestion_result.documents:
-            self.update_language_distribution(stats, document.language)
-
-            normalized_language = self.normalize_language(document)
-
-            if (
-                not normalized_language
-                or normalized_language not in AST_SUPPORTED_LANGUAGES
-            ):
-                stats.skipped_unsupported_language += 1
-                continue
-
-            stats.total_ast_eligible_documents += 1
-            documents_by_language[normalized_language].append(document)
+            documents_by_language[document.language].append(document)
 
         run = ChunkRun(
             repo_id=repo_id,
-            source_url=source_url,
             stats=stats,
             pool=self.new_pool(),
         )
@@ -552,11 +466,11 @@ class ASTCodeChunker:
 def log_batch_failure(
     batch: list[FileDocument], normalized_language: str, exc: Exception
 ) -> None:
-    """Warn that a batch failed and is about to be retried file by file.
+    """Warn that a batch failed and will be retried file by file.
 
     Args:
-        batch: The files in the failed batch.
-        normalized_language: Normalized language shared by the batch.
+        batch: Files in the failed batch.
+        normalized_language: chonkie language of the batch.
         exc: The error the batch raised.
     """
     logger.warning(

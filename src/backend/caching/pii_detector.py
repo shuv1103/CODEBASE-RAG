@@ -52,39 +52,31 @@ _SENSITIVE_RE = re.compile(
 def contains_pii(text: str) -> bool:
     """Detect PII or credentials that must never reach the shared cache.
 
-    Matches emails, US phone numbers, 16-digit card-like numbers and common
-    credentials (provider API keys and tokens, JWTs, private-key blocks,
-    `password=`-style assignments). Patterns are deliberately broad: a false
-    positive only costs a cache miss, a false negative leaks data. Callers
-    must treat an exception as "PII found" and bypass the cache.
+    Matches emails, US phone and card numbers, provider API keys and tokens,
+    JWTs, private keys and `password=`-style values. Deliberately broad: a
+    false positive only costs a cache miss.
 
     Args:
         text: The chat message to scan.
 
     Returns:
-        True if any pattern matches, False otherwise (including for empty
-        text).
+        True if any pattern matches; False for clean or empty text.
 
     Example:
         >>> contains_pii("mail me at a@b.com")
         True
     """
-    if not text:
-        return False
     return _SENSITIVE_RE.search(text) is not None
 
 
 def redact_pii(text: str) -> str:
     """Replace every PII or credential match with "[REDACTED]".
 
-    Call this before text leaves the process for a third party, such as
-    LangSmith traces.
-
     Args:
-        text: Text that may contain PII or credentials.
+        text: Text about to leave the process (e.g. a LangSmith trace).
 
     Returns:
-        The text with each match replaced; unchanged if nothing matched.
+        The text with each match replaced.
 
     Example:
         >>> redact_pii("mail a@b.com about it")

@@ -9,6 +9,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from utils.config import settings
@@ -18,10 +19,8 @@ logger = logging.getLogger(__name__)
 
 _GITHUB_API_TIMEOUT_SECONDS = 10
 
-# git runs on untrusted input (any public repo URL), so it gets no way to
-# prompt, no stored credentials (a private repo the server's account could
-# read must not be cloneable), no Git LFS downloads (an LFS-backed repo could
-# pull gigabytes past the size checks) and https as the only transport.
+# git runs on untrusted URLs: no prompts, no stored credentials (no private
+# repos), no LFS (bypasses size checks), https only.
 _GIT_ENV = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_ASKPASS": "",
@@ -29,9 +28,7 @@ _GIT_ENV = {
     "GIT_LFS_SKIP_SMUDGE": "1",
 }
 
-# The only inherited variables git needs: finding binaries, a home for its
-# config, temp space, Windows system paths, proxies and CA certificates.
-# Everything else (API keys, the Redis password) stays out of the subprocess.
+# All git needs from the environment; secrets never reach the subprocess.
 _INHERITED_ENV_VARS = (
     "PATH",
     "HOME",
@@ -54,10 +51,10 @@ _INHERITED_ENV_VARS = (
 
 
 def git_env() -> dict[str, str]:
-    """Build the environment for the git subprocess.
+    """Build the git subprocess's environment.
 
     Returns:
-        The allowed variables from os.environ, plus the hardening _GIT_ENV.
+        The allowed variables from os.environ plus the hardening _GIT_ENV.
     """
     inherited = {
         name: os.environ[name]
@@ -68,38 +65,28 @@ def git_env() -> dict[str, str]:
 
 
 class GitCloneError(Exception):
-    """Raised when a repo can't be cloned.
-
-    Causes: a bad URL, a missing or private repo, a git failure or a timeout.
-    """
+    """Raised when a repo can't be cloned; the message is user-facing."""
 
 
 class RepoTooLargeError(Exception):
-    """Raised when a repo exceeds a size limit.
-
-    The limits are MAX_REPO_DOWNLOAD_BYTES, MAX_REPO_FILES and MAX_REPO_BYTES.
-    """
+    """Raised when a repo exceeds a MAX_REPO_* limit (user-facing message)."""
 
 
 def clone_repo(url: str) -> Path:
-    """Shallow-clone a public GitHub repo to a temp dir, enforcing size limits.
+    """Shallow-clone a public GitHub repo into a temp dir, within size limits.
 
-    The caller owns the returned directory and must delete it; if this
-    raises, the directory and any partial clone are removed here. The URL is
-    re-validated because the worker takes it from the task queue and must
-    not trust it.
+    The caller must delete the returned dir; on failure it is removed here.
 
     Args:
-        url: Canonical https://github.com/<org>/<repo> URL.
+        url: Canonical https://github.com/<org>/<repo> URL (re-validated).
 
     Returns:
         Path of the temp directory holding the clone.
 
     Raises:
-        GitCloneError: If the URL isn't a canonical GitHub repo URL, the repo
-            is missing or private, or `git clone` fails or times out.
-        RepoTooLargeError: If the repo exceeds MAX_REPO_DOWNLOAD_BYTES (before
-            cloning) or MAX_REPO_FILES / MAX_REPO_BYTES (after).
+        GitCloneError: If the URL isn't canonical, the repo is missing or
+            private, or git fails or times out.
+        RepoTooLargeError: If a size limit is exceeded.
     """
     try:
         canonical = normalize_github_url(url)
@@ -123,7 +110,7 @@ def clone_repo(url: str) -> Path:
         raise
 
 
-def fetch_repo_metadata(org: str, repo: str) -> dict:
+def fetch_repo_metadata(org: str, repo: str) -> dict[str, Any]:
     """Read a public repo's metadata from the GitHub REST API.
 
     Args:
@@ -131,13 +118,13 @@ def fetch_repo_metadata(org: str, repo: str) -> dict:
         repo: Repository name.
 
     Returns:
-        The parsed JSON body of GET /repos/{org}/{repo}.
+        The parsed JSON of GET /repos/{org}/{repo}; "size" is in KB.
 
     Raises:
-        urllib.error.HTTPError: On a non-2xx response (404 = missing or
+        urllib.error.HTTPError: On a non-2xx response (404: missing or
             private).
-        urllib.error.URLError / OSError / ValueError: If GitHub can't be reached
-            or the body isn't JSON.
+        OSError: If GitHub can't be reached.
+        ValueError: If the body isn't JSON.
     """
     request = urllib.request.Request(
         f"https://api.github.com/repos/{org}/{repo}",
@@ -153,20 +140,17 @@ def fetch_repo_metadata(org: str, repo: str) -> dict:
 
 
 def check_remote_size(url: str) -> None:
-    """Reject a missing/private or oversized repo before downloading anything.
+    """Reject a missing, private or oversized repo before downloading it.
 
-    GitHub's "size" (KB) covers the whole packed repository, history
-    included, so it bounds what a shallow clone can download. When the API
-    can't answer (rate limit, outage) the clone proceeds and the post-clone
-    checks still apply.
+    If GitHub can't answer (rate limit, outage), the clone proceeds and the
+    post-clone limits still apply.
 
     Args:
-        url: Canonical https://github.com/<org>/<repo> URL.
+        url: Canonical GitHub URL.
 
     Raises:
-        GitCloneError: If GitHub reports the repo as not found (missing or
-            private).
-        RepoTooLargeError: If the repo is larger than MAX_REPO_DOWNLOAD_BYTES.
+        GitCloneError: If GitHub reports the repo as not found.
+        RepoTooLargeError: If it exceeds MAX_REPO_DOWNLOAD_BYTES.
     """
     org, repo = urlparse(url).path.strip("/").split("/")
     try:
@@ -197,15 +181,14 @@ def check_remote_size(url: str) -> None:
 
 
 def run_clone(url: str, dest: Path) -> None:
-    """Run a depth-1, single-branch `git clone` with credentials/prompts off.
+    """Run a depth-1, single-branch `git clone` with no credentials or prompts.
 
     Args:
-        url: Canonical GitHub URL of the repository to clone.
+        url: Canonical GitHub URL.
         dest: Directory to clone into.
 
     Raises:
-        GitCloneError: If git exits non-zero or exceeds
-            CLONE_TIMEOUT_SECONDS.
+        GitCloneError: If git fails or exceeds CLONE_TIMEOUT_SECONDS.
     """
     try:
         result = subprocess.run(
@@ -226,7 +209,8 @@ def run_clone(url: str, dest: Path) -> None:
             ],
             capture_output=True,
             text=True,
-            check=False,  # returncode is turned into GitCloneError below
+            # The returncode is turned into a GitCloneError below.
+            check=False,
             timeout=settings.clone_timeout_seconds,
             env=git_env(),
         )
@@ -236,18 +220,26 @@ def run_clone(url: str, dest: Path) -> None:
         ) from exc
 
     if result.returncode != 0:
-        raise GitCloneError(f"git clone failed: {result.stderr.strip()}")
+        # stderr exposes server paths: log it, never show it to clients.
+        logger.warning(
+            "git clone of %s failed (exit %d): %s",
+            url,
+            result.returncode,
+            result.stderr.strip(),
+        )
+        raise GitCloneError(
+            "git clone failed (repository unavailable or network error)"
+        )
 
 
 def enforce_size_limits(repo_dir: Path) -> None:
-    """Walk a clone (ignoring .git) and stop as soon as a size cap is exceeded.
+    """Walk a clone (ignoring .git) and stop at the first exceeded limit.
 
     Args:
-        repo_dir: Root of the cloned repository.
+        repo_dir: Root of the clone.
 
     Raises:
-        RepoTooLargeError: If the file count exceeds MAX_REPO_FILES or the
-            total size exceeds MAX_REPO_BYTES.
+        RepoTooLargeError: Past MAX_REPO_FILES files or MAX_REPO_BYTES.
     """
     total_files = 0
     total_bytes = 0

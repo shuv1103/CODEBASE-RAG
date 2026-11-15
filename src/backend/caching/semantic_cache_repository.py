@@ -3,6 +3,7 @@
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Literal
 
 from langcache import LangCache
 from langcache.models import CacheEntry, SearchStrategy
@@ -16,125 +17,90 @@ _REQUEST_TIMEOUT_MS = 5000
 _MAX_RESULTS = 3
 _REPO_ATTRIBUTE = "repo_id"
 
+CacheStrategy = Literal["exact", "semantic"]
+
 
 @dataclass(frozen=True)
 class CacheHit:
-    """A cache match.
+    """A cached answer that matched a lookup.
 
     Attributes:
-        response: The previously generated response.
-        similarity: Similarity of the match, rounded to 2 decimal places —
-            higher is more similar (1.0 for an exact match).
-        strategy: Which search strategy matched: "exact" or "semantic".
+        response: The cached answer text.
+        similarity: Match similarity rounded to 2 places; 1.0 for exact.
+        strategy: "exact" or "semantic".
     """
 
     response: str
     similarity: float
-    strategy: str
-
-
-@dataclass(frozen=True)
-class SemanticLookupResult:
-    """Result of a cache lookup.
-
-    Attributes:
-        hit: The best match for this repo_id, or None on a miss.
-        nearest_similarity: Similarity of that match; None on a miss,
-            since the cache only returns entries above its threshold.
-    """
-
-    hit: CacheHit | None
-    nearest_similarity: float | None
-
-
-# Frozen, so every miss path can share one instance.
-_MISS = SemanticLookupResult(hit=None, nearest_similarity=None)
+    strategy: CacheStrategy
 
 
 class SemanticCacheRepository(ABC):
-    """Interface for a store of cached answers (exact and semantic match)."""
+    """Store of cached answers, searched exactly or semantically per repo."""
 
     @abstractmethod
     def lookup(
         self, repo_id: str, normalized_query: str, semantic: bool = True
-    ) -> SemanticLookupResult:
-        """Find a cached answer for a query, exact match first. Never raises.
+    ) -> CacheHit | None:
+        """Find the best cached answer for a query. Never raises.
 
         Args:
-            repo_id: Repository the cache is scoped to.
+            repo_id: Cache scope (a repo id, or its follow-up scope).
             normalized_query: Query already passed through normalize_query.
             semantic: False restricts the search to exact matches.
 
         Returns:
-            SemanticLookupResult — see its docstring.
+            The best match, exact before semantic, or None on a miss.
         """
 
     @abstractmethod
     def store(
         self, repo_id: str, normalized_query: str, response: str
     ) -> None:
-        """Cache a response for a normalized query. Never raises.
+        """Cache an answer for a normalized query. Never raises.
 
         Args:
-            repo_id: Repository the cache is scoped to.
+            repo_id: Cache scope.
             normalized_query: Query already passed through normalize_query.
             response: The answer to cache.
         """
 
     @abstractmethod
     def clear(self, repo_id: str) -> None:
-        """Delete every cached entry for a repo. Never raises.
-
-        Call this before a re-ingestion so no answer grounded in the old
-        data survives it.
+        """Delete every cached entry in a scope. Never raises.
 
         Args:
-            repo_id: Repository whose entries should be deleted.
+            repo_id: Cache scope to empty.
         """
 
 
-def strategy_of(entry: CacheEntry) -> str:
-    """Return which LangCache search strategy produced a result.
+def strategy_of(entry: CacheEntry) -> CacheStrategy:
+    """Return which LangCache search strategy produced an entry.
 
     Args:
-        entry: A LangCache search result (CacheEntry).
+        entry: A LangCache search result.
 
     Returns:
-        "exact" or "semantic" (semantic when the field is missing).
+        "exact", or "semantic" for anything else.
     """
-    return str(
-        getattr(entry.search_strategy, "value", entry.search_strategy)
-        or "semantic"
-    )
+    value = getattr(entry.search_strategy, "value", entry.search_strategy)
+    return "exact" if value == "exact" else "semantic"
 
 
 class LangCacheRepository(SemanticCacheRepository):
-    """Answer cache on Redis LangCache, serving the exact and semantic tiers.
+    """Answer cache on Redis LangCache, scoped by a repo_id attribute.
 
-    One search runs both strategies: `exact` (case-insensitive prompt match)
-    and `semantic` (vector similarity, embedded by LangCache itself); an
-    exact match wins. Every entry, search and delete is scoped by a `repo_id`
-    attribute, since the same question means something different per
-    codebase. That attribute must be defined on the cache in the Redis Cloud
-    console (LangCache → your service → Attributes).
-
-    Fail-safe: when LangCache is disabled, unconfigured, unreachable or
-    erroring, lookups report a miss and stores and clears do nothing.
+    The repo_id attribute must be defined on the cache in the Redis Cloud
+    console. Fail-safe: when disabled, unconfigured or erroring, lookups miss
+    and stores and clears do nothing.
 
     Args:
-        server_url: LangCache API base URL. Defaults to LANGCACHE_SERVER_URL.
-        cache_id: LangCache cache ID. Defaults to LANGCACHE_CACHE_ID.
-        api_key: LangCache service API key. Defaults to LANGCACHE_API_KEY.
-        ttl_seconds: Entry lifetime. Defaults to LANGCACHE_TTL (3600).
-        similarity_threshold: Minimum similarity (0.5 to 1.0) for a semantic
-            hit. Defaults to LANGCACHE_SIMILARITY_THRESHOLD, or the cache's
-            own threshold setting when unset.
-
-    Example:
-        >>> repo = LangCacheRepository()
-        >>> repo.store("c3460b930023", "How does auth work?", "It uses JWTs...")
-        >>> repo.lookup("c3460b930023", "how does auth work?").hit.strategy
-        'exact'
+        server_url: LangCache API URL. Defaults to LANGCACHE_SERVER_URL.
+        cache_id: Defaults to LANGCACHE_CACHE_ID.
+        api_key: Defaults to LANGCACHE_API_KEY.
+        ttl_seconds: Entry lifetime. Defaults to LANGCACHE_TTL.
+        similarity_threshold: Minimum semantic similarity (0.5-1.0). Defaults
+            to LANGCACHE_SIMILARITY_THRESHOLD, else the cache's own setting.
     """
 
     def __init__(
@@ -182,20 +148,19 @@ class LangCacheRepository(SemanticCacheRepository):
 
     def lookup(
         self, repo_id: str, normalized_query: str, semantic: bool = True
-    ) -> SemanticLookupResult:
-        """Search this repo's cached answers, preferring an exact match.
+    ) -> CacheHit | None:
+        """Search a scope's cached answers in one call, exact match first.
 
         Args:
-            repo_id: Repository the cache is scoped to.
+            repo_id: Cache scope; an empty one always misses.
             normalized_query: Query already passed through normalize_query.
             semantic: False restricts the search to exact matches.
 
         Returns:
-            SemanticLookupResult with the best hit, or a miss when nothing
-            matched, when disabled, or on any error.
+            The best match, or None on a miss, when disabled, or on any error.
         """
         if self._client is None or not repo_id:
-            return _MISS
+            return None
         try:
             response = self._client.search(
                 prompt=normalized_query,
@@ -218,36 +183,34 @@ class LangCacheRepository(SemanticCacheRepository):
                     "error": str(exc),
                 },
             )
-            return _MISS
+            return None
 
         entries = response.data or []
         if not entries:
-            return _MISS
+            return None
 
         best = next(
             (e for e in entries if strategy_of(e) == "exact"), None
         ) or max(entries, key=lambda e: e.similarity or 0.0)
-        similarity = (
-            round(best.similarity, 2) if best.similarity is not None else 1.0
-        )
-        return SemanticLookupResult(
-            hit=CacheHit(
-                response=best.response,
-                similarity=similarity,
-                strategy=strategy_of(best),
+        return CacheHit(
+            response=best.response,
+            similarity=(
+                round(best.similarity, 2)
+                if best.similarity is not None
+                else 1.0
             ),
-            nearest_similarity=similarity,
+            strategy=strategy_of(best),
         )
 
     def store(
         self, repo_id: str, normalized_query: str, response: str
     ) -> None:
-        """Cache a non-empty answer for this repo until the TTL. Never raises.
+        """Cache a non-empty answer until the TTL. Never raises.
 
         Args:
-            repo_id: Repository the cache is scoped to.
+            repo_id: Cache scope; an empty one is skipped.
             normalized_query: Query already passed through normalize_query.
-            response: The answer to cache; empty responses are skipped.
+            response: The answer to cache; an empty one is skipped.
         """
         if self._client is None or not repo_id or not response:
             return
@@ -270,13 +233,11 @@ class LangCacheRepository(SemanticCacheRepository):
             )
 
     def clear(self, repo_id: str) -> None:
-        """Delete this repo's cached answers. Never raises.
-
-        Refuses an empty repo_id: LangCache deletes the WHOLE cache when a
-        delete has no attributes.
+        """Delete a scope's cached answers. Never raises.
 
         Args:
-            repo_id: Repository whose entries should be deleted.
+            repo_id: Cache scope; an empty one is refused, since LangCache
+                would delete the whole cache.
         """
         if self._client is None or not repo_id:
             return

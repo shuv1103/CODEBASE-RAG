@@ -1,8 +1,8 @@
-"""LangSmith tracing callbacks for agent, model, tool and cache events."""
+"""LangSmith tracing of agent, model, tool and cache events (redacted)."""
 
-import contextlib
 import functools
 import itertools
+import logging
 from collections.abc import Callable, Iterable
 from typing import Any, TypedDict
 
@@ -13,12 +13,17 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
+from langsmith.client import RUN_TYPE_T
 from langsmith.run_trees import RunTree
 
 from caching.pii_detector import redact_pii
 from utils.config import settings
 
+logger = logging.getLogger(__name__)
+
 _TRACING_ENABLED = settings.tracing_enabled
+# Counts hook failures, so only the first one is logged at WARNING.
+_tracing_failures = itertools.count()
 _PROJECT = settings.langchain_project
 _client: langsmith.Client | None = (
     langsmith.Client() if _TRACING_ENABLED else None
@@ -26,12 +31,12 @@ _client: langsmith.Client | None = (
 
 
 class InvocationRuns(TypedDict, total=False):
-    """The open LangSmith runs of one ADK invocation.
+    """Open LangSmith runs of one ADK invocation.
 
     Attributes:
-        agent: The invocation's agent run, once before_agent_callback ran.
-        model_stack: Model runs opened and not yet closed, innermost last.
-        tool_stack: Tool runs opened and not yet closed, innermost last.
+        agent: The invocation's root chain run.
+        model_stack: Open "llm" runs, innermost last.
+        tool_stack: Open "tool" runs, innermost last.
     """
 
     agent: RunTree | None
@@ -39,11 +44,9 @@ class InvocationRuns(TypedDict, total=False):
     tool_stack: list[RunTree]
 
 
-# Open runs per ADK invocation id, so "after" callbacks can close what
-# "before" callbacks opened.
+# Open runs per invocation, so "after" callbacks close what "before" opened.
 _runs: dict[str, InvocationRuns] = {}
-# ADK skips after_agent_callback when a run raises or is cancelled, so cap the
-# open invocations; past the cap the oldest is closed and forgotten.
+# ADK skips after_agent_callback on errors, so cap the open invocations.
 _MAX_OPEN_INVOCATIONS = 256
 _ABANDONED_RUN_ERROR = "invocation ended without after_agent_callback"
 
@@ -51,10 +54,10 @@ _ABANDONED_RUN_ERROR = "invocation ended without after_agent_callback"
 def close_runs(
     state: InvocationRuns, child_error: str, agent_error: str | None = None
 ) -> None:
-    """End an invocation's open model/tool runs and its agent run.
+    """End an invocation's open child runs, then its agent run.
 
     Args:
-        state: The invocation's entry in _runs.
+        state: The invocation's open runs.
         child_error: Error recorded on each still-open child run.
         agent_error: Error recorded on the agent run; None ends it normally.
     """
@@ -65,19 +68,14 @@ def close_runs(
         run.patch()
     agent_run: RunTree | None = state.get("agent")
     if agent_run:
-        if agent_error is None:
-            agent_run.end()
-        else:
-            agent_run.end(error=agent_error)
+        agent_run.end(error=agent_error)
         agent_run.patch()
 
 
 def invocation_state(invocation_id: str) -> InvocationRuns:
-    """Return an invocation's entry in _runs, creating it if needed.
+    """Return an invocation's open runs, creating the entry if needed.
 
-    Creating the entry keeps runs opened for an unknown invocation
-    findable by the matching "after" callback. Evicts the oldest entries
-    once more than _MAX_OPEN_INVOCATIONS are open.
+    Past _MAX_OPEN_INVOCATIONS entries, the oldest is closed and dropped.
 
     Args:
         invocation_id: ADK invocation id.
@@ -96,40 +94,46 @@ def invocation_state(invocation_id: str) -> InvocationRuns:
 
 
 def trace_safely(callback: Callable[..., None]) -> Callable[..., None]:
-    """Wrap a tracing hook so it is a no-op while tracing is off.
-
-    Tracing must never break a chat, so any exception is swallowed. The
-    wrapper returns None, so ADK proceeds with its own request/response.
+    """Decorate a tracing hook: a no-op while tracing is off, and never raises.
 
     Args:
-        callback: Tracing hook to wrap.
+        callback: The tracing hook.
 
     Returns:
-        The wrapped hook.
+        The wrapped hook, which always returns None (ADK proceeds unchanged).
     """
 
     @functools.wraps(callback)
     def wrapper(*args: Any, **kwargs: Any) -> None:
-        """Call callback when tracing is on, swallowing any error."""
-        if _TRACING_ENABLED:
-            with contextlib.suppress(Exception):
-                callback(*args, **kwargs)
+        """Call the hook if tracing is on, logging any error."""
+        if not _TRACING_ENABLED:
+            return
+        try:
+            callback(*args, **kwargs)
+        # Tracing must never break a chat; warn once, then stay quiet.
+        except Exception:
+            first_failure = next(_tracing_failures) == 0
+            logger.log(
+                logging.WARNING if first_failure else logging.DEBUG,
+                "LangSmith tracing hook %s failed",
+                callback.__name__,
+                exc_info=True,
+            )
 
     return wrapper
 
 
-# Traces go to a third party and bypass the cache's PII gate, so all user
-# text is passed through redact_pii before it is sent.
+# Traces leave the process, so all user text is PII-redacted first.
 
 
 def redact_values(values: dict[str, Any]) -> dict[str, Any]:
-    """Redact PII/credentials in a dict's string values (e.g. tool call args).
+    """Return a copy of a mapping with every string value PII-redacted.
 
     Args:
-        values: Mapping whose string values may contain user text.
+        values: Mapping such as tool call arguments.
 
     Returns:
-        A copy with every string value passed through redact_pii.
+        The redacted copy; non-string values are unchanged.
     """
     return {
         key: redact_pii(value) if isinstance(value, str) else value
@@ -142,11 +146,11 @@ def render_part(part: types.Part, with_call_args: bool) -> str | None:
 
     Args:
         part: A request or response content part.
-        with_call_args: Include a function call's arguments in its marker.
+        with_call_args: Include a function call's arguments.
 
     Returns:
-        The part's text, a "[tool_call: ...]" / "[tool_result: name]"
-        marker, or None for a part with nothing to show.
+        The text, a "[tool_call: name(args)]" / "[tool_result: name]" marker,
+        or None for a part with nothing to show.
     """
     if text := getattr(part, "text", None):
         return text
@@ -164,14 +168,14 @@ def render_part(part: types.Part, with_call_args: bool) -> str | None:
 def render_parts(
     parts: Iterable[types.Part] | None, with_call_args: bool = False
 ) -> str:
-    """Join the rendered form of every part that has something to show.
+    """Render and join content parts, PII-redacted.
 
     Args:
         parts: Content parts, or None.
-        with_call_args: Include function call arguments in tool_call markers.
+        with_call_args: Include function call arguments.
 
     Returns:
-        The joined text ("" when there are no renderable parts).
+        The space-joined text ("" when nothing renders).
     """
     return redact_pii(
         " ".join(
@@ -183,13 +187,10 @@ def render_parts(
 
 
 def extract_messages(llm_request: LlmRequest) -> list[dict[str, str]]:
-    """Flatten an LLM request's contents into role/content messages.
-
-    Render tool calls and tool results as "[tool_call: name]" and
-    "[tool_result: name]" placeholders.
+    """Flatten an LLM request into trace messages.
 
     Args:
-        llm_request: The ADK request about to be sent to the model.
+        llm_request: The request about to be sent to the model.
 
     Returns:
         One {"role", "content"} dict per request content.
@@ -204,14 +205,14 @@ def extract_messages(llm_request: LlmRequest) -> list[dict[str, str]]:
 
 
 def extract_llm_output(llm_response: LlmResponse) -> str:
-    """Render an LLM response's text and tool calls as a single string.
+    """Render an LLM response as trace text.
 
     Args:
-        llm_response: The ADK response returned by the model.
+        llm_response: The model's response.
 
     Returns:
-        "[error] ..." for an error response, "" for an empty one, otherwise
-        the space-joined text parts and "[tool_call: name(args)]" markers.
+        "[error] ..." for an error, "" for an empty response, otherwise its
+        text and tool-call markers.
     """
     if llm_response.error_message:
         return f"[error] {redact_pii(llm_response.error_message)}"
@@ -221,18 +222,21 @@ def extract_llm_output(llm_response: LlmResponse) -> str:
 
 
 def start_run(
-    state: InvocationRuns, name: str, run_type: str, inputs: dict[str, Any]
+    state: InvocationRuns,
+    name: str,
+    run_type: RUN_TYPE_T,
+    inputs: dict[str, Any],
 ) -> RunTree:
-    """Post a new run: a child of the invocation's agent run, else a root run.
+    """Post a run under the invocation's agent run, else as a root run.
 
     Args:
-        state: The invocation's entry in _runs (empty if unknown).
+        state: The invocation's open runs.
         name: Run name.
-        run_type: LangSmith run type ("llm", "tool", ...).
+        run_type: LangSmith run type, e.g. "llm" or "tool".
         inputs: Run inputs.
 
     Returns:
-        The posted run.
+        The posted RunTree.
     """
     agent_run: RunTree | None = state.get("agent")
     if agent_run:
@@ -245,7 +249,7 @@ def start_run(
             run_type=run_type,
             inputs=inputs,
             project_name=_PROJECT,
-            client=_client,
+            ls_client=_client,
         )
     run.post()
     return run
@@ -258,21 +262,19 @@ def log_cache_event(
     user_query: str,
     nearest_similarity: float | None = None,
 ) -> None:
-    """Post a cache hit/miss as its own root LangSmith chain run.
+    """Post a cache lookup as its own root chain run.
 
-    Cache hits never reach the ADK callbacks, so without this run they
-    would be missing from latency queries over root runs.
+    Cache hits never reach the ADK callbacks, so without this run they would
+    be missing from latency queries.
 
     Args:
-        repo_id: Repo the chat turn was scoped to.
-        outcome: "exact_hit" | "semantic_hit" | "miss" | "blocked".
-        user_query: The user's chat message.
-        nearest_similarity: Matched entry's similarity (1.0 for an exact
-            hit); None on a miss or "blocked".
+        repo_id: Repo the chat turn was about.
+        outcome: "exact_hit", "semantic_hit", "miss" or "blocked".
+        user_query: The chat message; PII-redacted before sending.
+        nearest_similarity: Matched entry's similarity, if any.
     """
     user_query = redact_pii(user_query)
-    # The query is repeated in the outputs so a trace reads on its own in the
-    # LangSmith UI.
+    # Repeated in outputs so the trace reads on its own in the UI.
     outputs: dict[str, Any] = {
         "cache_outcome": outcome,
         "user_query": user_query,
@@ -280,50 +282,38 @@ def log_cache_event(
     if nearest_similarity is not None:
         outputs["nearest_similarity"] = nearest_similarity
 
-    run = RunTree(
-        name=f"semantic_cache_{outcome}",
-        run_type="chain",
-        inputs={"repo_id": repo_id, "user_query": user_query},
-        project_name=_PROJECT,
-        client=_client,
+    run = start_run(
+        {},
+        f"semantic_cache_{outcome}",
+        "chain",
+        {"repo_id": repo_id, "user_query": user_query},
     )
-    run.post()
     run.end(outputs=outputs)
     run.patch()
 
 
 @trace_safely
 def before_agent_callback(callback_context: CallbackContext) -> None:
-    """Open the root LangSmith chain run for an invocation (ADK callback).
+    """Open the invocation's root chain run (ADK callback).
 
     Args:
-        callback_context: ADK context for the agent invocation.
-
-    Returns:
-        None, so ADK proceeds with the agent run.
+        callback_context: ADK context of the agent invocation.
     """
     user_content = callback_context.user_content
     input_text = render_parts(user_content.parts) if user_content else ""
-    run = RunTree(
-        name=callback_context.agent_name,
-        run_type="chain",
-        inputs={"input": input_text},
-        project_name=_PROJECT,
-        client=_client,
+    # A fresh {} state has no agent run, so start_run posts a root run.
+    run = start_run(
+        {}, callback_context.agent_name, "chain", {"input": input_text}
     )
-    run.post()
     invocation_state(callback_context.invocation_id)["agent"] = run
 
 
 @trace_safely
 def after_agent_callback(callback_context: CallbackContext) -> None:
-    """Close an invocation's root run and any open child runs (ADK callback).
+    """Close the invocation's root run and any open children (ADK callback).
 
     Args:
-        callback_context: ADK context for the agent invocation.
-
-    Returns:
-        None, so ADK keeps the agent's own output.
+        callback_context: ADK context of the agent invocation.
     """
     state = _runs.pop(callback_context.invocation_id, {})
     close_runs(state, "closed by after_agent_callback")
@@ -336,11 +326,8 @@ def before_model_callback(
     """Open an "llm" child run for a model call (ADK callback).
 
     Args:
-        callback_context: ADK context for the agent invocation.
+        callback_context: ADK context of the agent invocation.
         llm_request: The request about to be sent to the model.
-
-    Returns:
-        None, so ADK proceeds with the real model call.
     """
     state = invocation_state(callback_context.invocation_id)
     model_run = start_run(
@@ -349,7 +336,7 @@ def before_model_callback(
         run_type="llm",
         inputs={"messages": extract_messages(llm_request)},
     )
-    state.setdefault("model_stack", []).append(model_run)
+    state["model_stack"].append(model_run)
 
 
 @trace_safely
@@ -359,11 +346,8 @@ def after_model_callback(
     """Close the latest "llm" run with the model's output (ADK callback).
 
     Args:
-        callback_context: ADK context for the agent invocation.
-        llm_response: The response returned by the model.
-
-    Returns:
-        None, so ADK keeps the model's own response.
+        callback_context: ADK context of the agent invocation.
+        llm_response: The model's response.
     """
     model_stack: list[RunTree] = _runs.get(
         callback_context.invocation_id, {}
@@ -381,18 +365,15 @@ def before_tool_callback(
     """Open a "tool" child run for a tool call (ADK callback).
 
     Args:
-        tool: The tool being invoked.
-        args: Arguments the model passed to the tool.
-        tool_context: ADK context for the tool call.
-
-    Returns:
-        None, so ADK proceeds with the real tool call.
+        tool: The tool being called.
+        args: Arguments the model passed; PII-redacted before sending.
+        tool_context: ADK context of the tool call.
     """
     state = invocation_state(tool_context.invocation_id)
     tool_run = start_run(
         state, name=tool.name, run_type="tool", inputs=redact_values(args)
     )
-    state.setdefault("tool_stack", []).append(tool_run)
+    state["tool_stack"].append(tool_run)
 
 
 @trace_safely
@@ -405,18 +386,16 @@ def after_tool_callback(
     """Close the latest "tool" run with the tool's result (ADK callback).
 
     Args:
-        tool: The tool that was invoked.
-        args: Arguments the model passed to the tool.
-        tool_context: ADK context for the tool call.
+        tool: The tool that was called.
+        args: Arguments the model passed.
+        tool_context: ADK context of the tool call.
         tool_response: The tool's result.
-
-    Returns:
-        None, so ADK keeps the tool's own result.
     """
     tool_stack: list[RunTree] = _runs.get(tool_context.invocation_id, {}).get(
         "tool_stack", []
     )
     if tool_stack:
         tool_run = tool_stack.pop()
-        tool_run.end(outputs=tool_response or {})
+        # Retrieved code can hold a repo's committed secrets.
+        tool_run.end(outputs=redact_values(tool_response or {}))
         tool_run.patch()

@@ -4,24 +4,25 @@ import threading
 import uuid
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
-from typing import TypedDict, Unpack
+from typing import Literal, TypedDict, Unpack
 
 from pydantic import BaseModel
 
 from utils.time_utils import utc_now_iso
 
+# A typo like "redy" is a type error, and Pydantic rejects it on read.
+RepoStatusValue = Literal[
+    "pending", "cloning", "chunking", "embedding", "ready", "failed"
+]
+
 IN_FLIGHT_STATUSES = frozenset({"pending", "cloning", "chunking", "embedding"})
 
 
 class StatusFields(TypedDict, total=False):
-    """RepoStatus fields a status write may overwrite (all optional).
-
-    Typing the **fields of every update with this makes a misspelt field
-    (say chunks_embeded=) a type error instead of a silently ignored key.
-    """
+    """Fields a status write may set; a misspelt key is a type error."""
 
     url: str
-    status: str
+    status: RepoStatusValue
     chunks_total: int | None
     chunks_embedded: int | None
     error: str | None
@@ -32,23 +33,20 @@ class StatusFields(TypedDict, total=False):
 
 
 class PublicRepoStatus(BaseModel):
-    """The fields of a repo's status record that API clients may see.
+    """The repo status fields API clients see.
 
     Attributes:
-        repo_id: Stable id derived from the normalized repo URL.
-        url: Normalized repository URL.
-        status: One of pending | cloning | chunking | embedding | ready |
-            failed.
-        chunks_total: Total chunks to embed, once chunking has finished.
+        status: pending, cloning, chunking, embedding, ready or failed.
+        chunks_total: Chunks to embed, once chunking has finished.
         chunks_embedded: Chunks embedded so far.
-        error: Failure reason, set only when status is "failed".
-        created_at: UTC ISO timestamp of record creation.
-        ready_at: UTC ISO timestamp when status became "ready".
+        error: User-facing failure reason, set only when "failed".
+        created_at: UTC ISO 8601 creation time.
+        ready_at: UTC ISO 8601 time the repo became "ready".
     """
 
     repo_id: str
     url: str
-    status: str
+    status: RepoStatusValue
     chunks_total: int | None = None
     chunks_embedded: int | None = None
     error: str | None = None
@@ -57,13 +55,12 @@ class PublicRepoStatus(BaseModel):
 
 
 class RepoStatus(PublicRepoStatus):
-    """Ingestion status record for a repo: the API's fields plus internal ones.
+    """A repo's ingestion status record, including internal fields.
 
     Attributes:
-        updated_at: UTC ISO timestamp of the last write; None on records
-            written before this field existed (created_at is used instead).
-        attempt_id: Id of the current ingestion attempt (internal, not
-            returned by the API); a queued task with another id is stale.
+        updated_at: UTC ISO time of the last write; None on old records.
+        attempt_id: Current ingestion attempt; a task with another id is
+            stale.
     """
 
     updated_at: str | None = None
@@ -95,9 +92,6 @@ class RepoStatus(PublicRepoStatus):
 
         Args:
             **fields: RepoStatus fields to overwrite.
-
-        Returns:
-            The updated copy.
         """
         return self.model_copy(update={**fields, "updated_at": utc_now_iso()})
 
@@ -107,22 +101,20 @@ class RepoStatus(PublicRepoStatus):
         now: datetime | None = None,
         pending_stale_after_seconds: int | None = None,
     ) -> bool:
-        """Check whether an unfinished ingestion went too long without update.
+        """Check whether an in-flight record went too long without a write.
 
         Args:
-            stale_after_seconds: Age beyond which no live task can own a
-                running (cloning, chunking or embedding) record.
-            now: Current time (UTC); defaults to the real clock.
-            pending_stale_after_seconds: Age beyond which a "pending" record
-                counts as lost. Defaults to stale_after_seconds.
+            stale_after_seconds: Threshold for a running record.
+            now: Current UTC time; defaults to the real clock.
+            pending_stale_after_seconds: Threshold for a "pending" record,
+                which may wait in the queue. Defaults to stale_after_seconds.
 
         Returns:
             True for an in-flight record older than its threshold.
         """
         if self.status not in IN_FLIGHT_STATUSES:
             return False
-        # A pending task may still be waiting in the queue behind others,
-        # so its staleness can't be judged by the running-task threshold.
+        # A pending task may legitimately wait in the queue for a long time.
         threshold = (
             pending_stale_after_seconds
             if self.status == "pending"
@@ -135,44 +127,34 @@ class RepoStatus(PublicRepoStatus):
 
 
 class StatusStore(ABC):
-    """Interface for storing repo ingestion status records."""
+    """Storage interface for repo ingestion status records."""
 
     @abstractmethod
     def get(self, repo_id: str) -> RepoStatus | None:
-        """Return the current status record for a repo.
+        """Return a repo's status record.
 
         Args:
             repo_id: Repo to look up.
 
         Returns:
-            The status record, or None if the repo is unknown.
+            The record, or None if the repo is unknown.
         """
 
     @abstractmethod
     def create_if_absent(
         self, repo_id: str, url: str
     ) -> tuple[RepoStatus, bool]:
-        """Atomically create a pending record for repo_id if none exists yet.
+        """Atomically create a pending record unless one exists.
 
-        One atomic call, not get()-then-create(), so two concurrent requests
-        for the same new repo can't both enqueue an ingestion.
+        One atomic call, so concurrent requests for a new repo enqueue it once.
 
         Args:
             repo_id: Repo to create a record for.
             url: Normalized repository URL.
 
         Returns:
-            (record, created). created=False means a record already existed
-            and is returned unchanged.
-        """
-
-    @abstractmethod
-    def update(self, repo_id: str, **fields: Unpack[StatusFields]) -> None:
-        """Merge fields into the existing record for a repo. No-op if unknown.
-
-        Args:
-            repo_id: Repo whose record should be updated.
-            **fields: RepoStatus fields to overwrite.
+            (record, created); created is False when an existing record is
+            returned unchanged.
         """
 
     @abstractmethod
@@ -182,41 +164,34 @@ class StatusStore(ABC):
         expected_attempt_id: str | None,
         **fields: Unpack[StatusFields],
     ) -> bool:
-        """Atomically merge fields only if the record's attempt_id matches.
-
-        Lets a stale ingestion attempt (or a lost race between two retries)
-        fail its write instead of overwriting the current attempt's record.
+        """Atomically merge fields while the record's attempt_id still matches.
 
         Args:
-            repo_id: Repo whose record should be updated.
+            repo_id: Repo whose record to update.
             expected_attempt_id: Attempt the caller belongs to.
             **fields: RepoStatus fields to overwrite.
 
         Returns:
-            True if the record was updated; False if it is unknown or now
-            belongs to another attempt.
+            True if updated; False if the record is unknown or now belongs to
+            another attempt.
         """
 
 
 class InMemoryStatusStore(StatusStore):
-    """Thread-safe in-memory StatusStore for tests and local development.
-
-    Single-process only: Celery workers can't see it, so production always
-    uses RedisStatusStore.
-    """
+    """Thread-safe single-process StatusStore for tests and local runs."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._records: dict[str, RepoStatus] = {}
 
     def get(self, repo_id: str) -> RepoStatus | None:
-        """Return the status record for a repo, or None if unknown.
+        """Return a repo's status record.
 
         Args:
             repo_id: Repo to look up.
 
         Returns:
-            The status record, or None.
+            The record, or None if unknown.
         """
         with self._lock:
             return self._records.get(repo_id)
@@ -224,15 +199,14 @@ class InMemoryStatusStore(StatusStore):
     def create_if_absent(
         self, repo_id: str, url: str
     ) -> tuple[RepoStatus, bool]:
-        """Create a pending record under the lock if none exists yet.
+        """Create a pending record under the lock unless one exists.
 
         Args:
             repo_id: Repo to create a record for.
             url: Normalized repository URL.
 
         Returns:
-            (record, created); created=False means the existing record was
-            returned unchanged.
+            (record, created).
         """
         with self._lock:
             existing = self._records.get(repo_id)
@@ -244,10 +218,10 @@ class InMemoryStatusStore(StatusStore):
             return record, True
 
     def update(self, repo_id: str, **fields: Unpack[StatusFields]) -> None:
-        """Merge fields into a repo's record. No-op if unknown.
+        """Merge fields unconditionally (test helper; no-op if unknown).
 
         Args:
-            repo_id: Repo whose record should be updated.
+            repo_id: Repo whose record to update.
             **fields: RepoStatus fields to overwrite.
         """
         with self._lock:
@@ -262,16 +236,15 @@ class InMemoryStatusStore(StatusStore):
         expected_attempt_id: str | None,
         **fields: Unpack[StatusFields],
     ) -> bool:
-        """Merge fields under the lock only if the attempt still matches.
+        """Merge fields under the lock while the attempt still matches.
 
         Args:
-            repo_id: Repo whose record should be updated.
+            repo_id: Repo whose record to update.
             expected_attempt_id: Attempt the caller belongs to.
             **fields: RepoStatus fields to overwrite.
 
         Returns:
-            True if the record was updated; False if it is unknown or now
-            belongs to another attempt.
+            True if updated; False if unknown or another attempt's.
         """
         with self._lock:
             existing = self._records.get(repo_id)

@@ -1,7 +1,4 @@
-"""Version 1 of the HTTP API (routes in status_routes).
+"""Version 1 of the HTTP API (routes in repo_routes).
 
-The router is not re-exported: its module imports api.core.dependencies,
-which builds the API's clients at import.
+Nothing is re-exported: import each module by its full path.
 """
-
-__all__: list[str] = []

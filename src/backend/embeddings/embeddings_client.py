@@ -1,34 +1,26 @@
 """OpenAI embedding client and batch embedding of chunks."""
 
 import functools
-from typing import TYPE_CHECKING, Any
 
 from langchain_openai import OpenAIEmbeddings
 
-from utils.config import settings
-
-from .embeddings_formatter import (
+from embeddings.embeddings_formatter import (
     build_embedded_chunk,
     build_embedding_input_text,
 )
-from .embeddings_models import EmbeddedChunk
-
-if TYPE_CHECKING:
-    from utils.rate_limiter import ExponentialBackoff
+from models.chunk_models import CodeChunk
+from models.embeddings_models import EmbeddedChunk
+from utils.config import settings
+from utils.rate_limiter import ExponentialBackoff
 
 
 class EmbeddingService:
-    """OpenAI embedding client for code chunks and user queries.
+    """OpenAI embeddings for code chunks and user queries.
 
     Args:
-        api_key: OpenAI API key. Defaults to OPENAI_API_KEY.
-        model_name: OpenAI embedding model. Defaults to EMBEDDING_MODEL.
-        dimensions: Optional output dimensionality; None uses the model
-            default.
-
-    Example:
-        >>> service = EmbeddingService()
-        >>> vector = service.embed_query("Where is the login handler?")
+        api_key: Defaults to OPENAI_API_KEY.
+        model_name: Defaults to EMBEDDING_MODEL.
+        dimensions: Output size; None keeps the model default (3072).
     """
 
     def __init__(
@@ -41,74 +33,62 @@ class EmbeddingService:
             model=model_name or settings.embedding_model,
             api_key=api_key or settings.openai_api_key.get_secret_value(),
             dimensions=dimensions,
+            # ExponentialBackoff owns retries (one budget slot per attempt).
+            max_retries=0,
         )
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple code or document chunks.
-
-        Drop empty and whitespace-only texts first, so the result can be
-        shorter than the input.
+        """Embed texts in one OpenAI call, one vector per text.
 
         Args:
-            texts: List of chunk texts.
+            texts: Chunk texts to embed.
 
         Returns:
-            List of embedding vectors, one per non-empty text.
+            One vector per text, in order.
+
+        Raises:
+            ValueError: If any text is blank (vectors would no longer line
+                up with their chunks).
         """
-        if not texts:
-            return []
-
-        cleaned_texts = [
-            text.strip() for text in texts if text and text.strip()
-        ]
-
+        cleaned_texts = [text.strip() for text in texts]
+        if not all(cleaned_texts):
+            raise ValueError("Cannot embed a blank text")
         if not cleaned_texts:
             return []
-
         return self._embeddings.embed_documents(cleaned_texts)
 
     def embed_query(self, query: str) -> list[float]:
-        """Generate an embedding for a user query.
+        """Embed one user query (RetrievalService validates it first).
 
         Args:
-            query: User question / retrieval query.
+            query: The stripped, non-blank question.
 
         Returns:
-            Embedding vector for the query.
-
-        Raises:
-            ValueError: If the query is empty or whitespace-only.
+            The query's embedding vector.
         """
-        if not query or not query.strip():
-            raise ValueError("Query text cannot be empty")
-
-        return self._embeddings.embed_query(query.strip())
+        return self._embeddings.embed_query(query)
 
 
 def embed_chunks(
-    chunks: list[dict[str, Any]],
+    chunks: list[CodeChunk],
     embedder: EmbeddingService,
-    backoff: "ExponentialBackoff",
-    model_name: str,
+    backoff: ExponentialBackoff,
 ) -> list[EmbeddedChunk]:
-    """Embed one batch of serialized chunks, retrying rate limits with backoff.
+    """Embed one batch of chunks, retrying rate limits.
 
     Args:
-        chunks: Serialized chunk dicts from the chunk stage.
+        chunks: The batch's code chunks.
         embedder: Embedding client.
         backoff: Retry handler wrapping the OpenAI call.
-        model_name: Embedding model name stored on each result.
 
     Returns:
-        One EmbeddedChunk per returned vector.
+        One EmbeddedChunk per chunk, in order.
     """
     texts = [build_embedding_input_text(chunk) for chunk in chunks]
     vectors = backoff.execute(
         functools.partial(embedder.embed_documents, texts)
     )
     return [
-        build_embedded_chunk(
-            raw_chunk=chunk, vector=vector, model_name=model_name
-        )
+        build_embedded_chunk(chunk, vector)
         for chunk, vector in zip(chunks, vectors, strict=True)
     ]

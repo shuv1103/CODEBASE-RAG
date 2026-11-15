@@ -3,84 +3,65 @@
 import logging
 import shutil
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Unpack
+from typing import Protocol, Unpack
 
 from chunking.chunker import ASTCodeChunker
 from embeddings.embeddings_client import EmbeddingService, embed_chunks
-from embeddings.qdrant_store import QdrantVectorStore
-from storage.status_store import StatusFields
+from ingestion.git_cloner import clone_repo
+from ingestion.repo_loader import RepoLoader
+from models.chunk_models import CodeChunk
+from storage.qdrant_store import QdrantVectorStore
+from storage.status_store import RepoStatusValue, StatusFields
 from utils.config import settings
 from utils.iter_utils import batchify
 from utils.rate_limiter import ExponentialBackoff
 
-from .git_cloner import clone_repo
-from .repo_loader import RepoLoader
-
 logger = logging.getLogger(__name__)
 
-ProgressCallback = Callable[[StatusFields], None] | None
-# report(status, **fields): the stage-facing wrapper around ProgressCallback.
-Reporter = Callable[..., None]
+ProgressCallback = Callable[[StatusFields], None]
+
+
+class Reporter(Protocol):
+    """Stage-facing progress callback: report(status, **fields)."""
+
+    def __call__(
+        self, status: RepoStatusValue, **fields: Unpack[StatusFields]
+    ) -> None:
+        """Report a stage status plus optional chunk counts."""
 
 
 class IngestionError(Exception):
-    """Raised when a repo cannot be ingested.
-
-    For example it is empty or unsupported, or a pipeline step failed.
-    """
+    """Raised when a repo cannot be ingested; the message is user-facing."""
 
 
 class IngestionTimeoutError(IngestionError):
     """Raised when ingestion exceeds INGESTION_TIMEOUT_SECONDS."""
 
 
-def clone_stage(source_url: str, report: Reporter) -> Path:
-    """Shallow-clone the repo into a temp dir (pipeline stage 1).
-
-    The caller checks the timeout once it holds the path, so a timeout
-    can't leak the clone.
-
-    Args:
-        source_url: Normalized repository URL.
-        report: Progress callback, called with the stage status.
-
-    Returns:
-        Path of the temp clone directory.
-
-    Raises:
-        GitCloneError: If the clone fails or times out.
-        RepoTooLargeError: If the repo exceeds the size caps.
-    """
-    report("cloning")
-    return clone_repo(source_url)
-
-
 def chunk_stage(
     local_path: Path,
     repo_id: str,
-    source_url: str,
     check_timeout: Callable[[], None],
     report: Reporter,
-) -> list[dict[str, Any]]:
-    """Load the repo's files and chunk them by AST (pipeline stage 2).
+) -> list[CodeChunk]:
+    """Stage 2: load the repo's supported files and chunk them by AST.
 
     Args:
-        local_path: Directory holding the cloned repo.
-        repo_id: Repository id to stamp on each chunk.
-        source_url: Repository URL to stamp on each chunk.
+        local_path: Directory holding the clone.
+        repo_id: Stamped on each chunk.
         check_timeout: Raises IngestionTimeoutError once the budget is spent.
-        report: Progress callback, called with the stage status.
+        report: Progress callback, called with "chunking" after each batch.
 
     Returns:
-        Chunks serialized as dicts (CodeChunk.model_dump()).
+        The chunks, kept as models so no serialized copy of the repo is held.
 
     Raises:
-        IngestionError: If no AST-chunkable source files were found, or the
-            repo produces more than MAX_REPO_CHUNKS chunks (caps embedding
-            spend).
-        IngestionTimeoutError: If the ingestion time budget is exceeded.
+        IngestionError: If there is nothing to chunk, or more than
+            MAX_REPO_CHUNKS chunks (caps embedding spend).
+        IngestionTimeoutError: If the time budget is spent.
     """
     report("chunking")
     ingestion_result = RepoLoader(str(local_path)).load()
@@ -93,7 +74,6 @@ def chunk_stage(
     chunking_result = ASTCodeChunker().chunk(
         ingestion_result,
         repo_id=repo_id,
-        source_url=source_url,
         on_batch=after_batch,
     )
     check_timeout()
@@ -109,81 +89,74 @@ def chunk_stage(
             f"(limit {settings.max_repo_chunks})"
         )
 
-    return [chunk.model_dump() for chunk in chunking_result.chunks]
+    return chunking_result.chunks
 
 
 def embed_and_store_stage(
-    chunk_dicts: list[dict[str, Any]],
+    chunks: list[CodeChunk],
     repo_id: str,
     check_timeout: Callable[[], None],
     report: Reporter,
 ) -> int:
-    """Embed chunks in batches and upsert them into Qdrant (stage 3).
+    """Stage 3: embed chunks in batches and upsert them into Qdrant.
 
-    Delete the repo's existing points first, so a re-ingestion keeps no
-    vectors of deleted files; chat is blocked until the repo is "ready"
-    again, so the gap is never read. Report progress after every batch and
-    retry rate-limit errors with exponential backoff.
+    Points are tagged with a fresh run id; the repo's other points are deleted
+    only after the last batch, so a failed run keeps the previous index.
 
     Args:
-        chunk_dicts: Serialized chunks from the chunk stage.
-        repo_id: Repository id, stored on every point for per-repo filtering.
+        chunks: Chunks from the chunk stage.
+        repo_id: Stored on every point for per-repo filtering.
         check_timeout: Raises IngestionTimeoutError once the budget is spent.
-        report: Progress callback, called with status and chunk counts.
+        report: Progress callback, called with chunk counts after each batch.
 
     Returns:
         Number of chunks embedded and stored.
 
     Raises:
-        IngestionTimeoutError: If the ingestion time budget is exceeded.
+        IngestionTimeoutError: If the time budget is spent.
     """
-    report("embedding", chunks_total=len(chunk_dicts), chunks_embedded=0)
+    report("embedding", chunks_total=len(chunks), chunks_embedded=0)
 
-    model_name = settings.embedding_model
-    embedder = EmbeddingService(model_name=model_name)
+    embedder = EmbeddingService()
     backoff = ExponentialBackoff()
     vector_store = QdrantVectorStore(repo_id=repo_id)
-    vector_store.delete_repo()
+    run_id = uuid.uuid4().hex
 
     embedded_total = 0
-    for batch in batchify(chunk_dicts, settings.embedding_batch_size):
+    for batch in batchify(chunks, settings.embedding_batch_size):
         check_timeout()
 
-        embedded_chunks = embed_chunks(batch, embedder, backoff, model_name)
-        vector_store.upsert(embedded_chunks)
+        embedded_chunks = embed_chunks(batch, embedder, backoff)
+        vector_store.upsert(embedded_chunks, run_id=run_id)
         embedded_total += len(embedded_chunks)
 
         report(
             "embedding",
-            chunks_total=len(chunk_dicts),
+            chunks_total=len(chunks),
             chunks_embedded=embedded_total,
         )
 
+    vector_store.delete_stale(run_id)
     return embedded_total
 
 
 def ingest_repo(
-    source_url: str, repo_id: str, on_progress: ProgressCallback = None
+    source_url: str, repo_id: str, on_progress: ProgressCallback | None = None
 ) -> None:
-    """Run clone -> chunk -> embed_and_store end to end for one repo.
+    """Run clone -> chunk -> embed_and_store for one repo.
 
-    Run the stages in order and own what they share: timeout checks,
-    progress reporting and cleanup. The temp clone is always deleted.
-    The caller must pass a normalized source_url (normalize_github_url) and
-    the repo_id computed from it; neither is re-derived here.
+    The temp clone is always deleted.
 
     Args:
-        source_url: Normalized repository URL.
-        repo_id: Id computed from source_url; stored on every Qdrant point
-            for per-repo filtering.
-        on_progress: Optional callback receiving {"status": ..., **fields}
-            at each stage and after each embedding batch.
+        source_url: Normalized repository URL (normalize_github_url).
+        repo_id: compute_repo_id(source_url).
+        on_progress: Receives StatusFields({"status", ...}) at each stage and
+            after each batch.
 
     Raises:
-        IngestionTimeoutError: If the run exceeds INGESTION_TIMEOUT_SECONDS.
-        IngestionError: If the repo has no AST-chunkable source files.
+        IngestionError: If the repo can't be indexed, including timeouts.
         GitCloneError: If cloning fails.
-        RepoTooLargeError: If the repo exceeds the size caps.
+        RepoTooLargeError: If a size limit is exceeded.
 
     Example:
         >>> url = normalize_github_url("https://github.com/org/repo")
@@ -193,7 +166,9 @@ def ingest_repo(
     started_at = time.monotonic()
     local_path: Path | None = None
 
-    def report(status: str, **fields: Unpack[StatusFields]) -> None:
+    def report(
+        status: RepoStatusValue, **fields: Unpack[StatusFields]
+    ) -> None:
         if on_progress:
             on_progress(StatusFields(status=status, **fields))
 
@@ -204,13 +179,12 @@ def ingest_repo(
             )
 
     try:
-        local_path = clone_stage(source_url, report)
+        report("cloning")
+        local_path = clone_repo(source_url)
         check_timeout()
-        chunk_dicts = chunk_stage(
-            local_path, repo_id, source_url, check_timeout, report
-        )
+        chunks = chunk_stage(local_path, repo_id, check_timeout, report)
         embedded_total = embed_and_store_stage(
-            chunk_dicts, repo_id, check_timeout, report
+            chunks, repo_id, check_timeout, report
         )
 
         logger.info(

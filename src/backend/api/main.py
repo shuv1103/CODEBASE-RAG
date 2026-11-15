@@ -4,14 +4,16 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.core.exceptions import register_exception_handlers
+from api.core.middleware import (
+    BodySizeLimitMiddleware,
+    RequestIdMiddleware,
+    UnhandledErrorMiddleware,
+)
+from api.core.rate_limit import limiter
+from api.routes.v1.repo_routes import router
 from utils.config import settings
 from utils.logging_config import configure_logging
-
-from .core.body_limit import BodySizeLimitMiddleware
-from .core.exceptions import register_exception_handlers
-from .core.rate_limit import limiter
-from .core.request_id import RequestIdMiddleware
-from .routes.v1.status_routes import router
 
 configure_logging(service="api")
 
@@ -26,10 +28,11 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 
+# Added first so it is innermost: a 500 still gets CORS and request-id headers.
+app.add_middleware(UnhandledErrorMiddleware)
 app.add_middleware(
     BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes
 )
-
 
 app.add_middleware(
     CORSMiddleware,

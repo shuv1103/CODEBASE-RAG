@@ -8,7 +8,7 @@ include = ["src/backend/**/*.py"]
 [lint]
 select = [
     "E", "W", "F", "I", "N", "B", "UP", "SIM", "C90", "ANN", "D", "BLE",
-    "T20", "PL", "RET", "PTH", "ERA", "RUF",
+    "T20", "PL", "RET", "PTH", "ERA", "RUF", "TID252",
 ]
 ignore = [
     "E501",     # the formatter wraps code; long strings/URLs stay readable
@@ -21,6 +21,10 @@ ignore = [
 
 [lint.pydocstyle]
 convention = "google"
+
+# Absolute imports from the src/backend root only (pyguide §2.2, CS-11).
+[lint.flake8-tidy-imports]
+ban-relative-imports = "all"
 
 [lint.per-file-ignores]
 # The warnings filter must run before instructor (via ragas) is imported.

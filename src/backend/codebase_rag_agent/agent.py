@@ -1,4 +1,4 @@
-"""Codebase Q&A agent (Google ADK) and its lazily built default instance."""
+"""Codebase Q&A agent (Google ADK) and its lazily built default."""
 
 import functools
 
@@ -7,12 +7,11 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
 from google.adk.tools import FunctionTool
 
-from utils.config import settings
-from utils.model_config import build_llm_model
-from utils.rate_limiter import get_openai_budget
-
-from .tools import CodebaseRetrievalTool, get_codebase_retrieval_tool
-from .tracing import (
+from codebase_rag_agent.tools import (
+    CodebaseRetrievalTool,
+    get_codebase_retrieval_tool,
+)
+from codebase_rag_agent.tracing import (
     after_agent_callback,
     after_model_callback,
     after_tool_callback,
@@ -20,42 +19,35 @@ from .tracing import (
     before_model_callback,
     before_tool_callback,
 )
+from utils.config import settings
+from utils.model_config import build_llm_model
+from utils.rate_limiter import get_openai_budget
 
 
 async def acquire_openai_budget(
     callback_context: CallbackContext, llm_request: LlmRequest
 ) -> None:
-    """Take a shared OpenAI budget slot before a model call (ADK callback).
+    """Take a shared OpenAI budget slot before each model call (ADK callback).
 
-    A chat turn makes several model calls (tool call, then final answer),
-    so the budget is taken per call, not once per turn.
-
-    Args:
-        callback_context: ADK callback context (unused).
-        llm_request: The outgoing model request (unused).
-
-    Returns:
-        None, so ADK goes on to call the model.
+    Returns None so ADK goes on to call the model; both arguments are
+    unused but required by ADK's callback signature.
     """
     await get_openai_budget().acquire_async()
 
 
 def build_agent(retrieval_tool: CodebaseRetrievalTool) -> LlmAgent:
-    """Build an LlmAgent wired to the given retrieval tool.
-
-    The API builds one agent per repo, each with a tool scoped to that
-    repo's chunks. The default `root_agent` below serves `adk web` and the
-    evaluation scripts.
+    """Build the codebase Q&A agent around a retrieval tool.
 
     Args:
-        retrieval_tool: Tool whose retrieve_code_context becomes the agent's
-            only function tool.
+        retrieval_tool: Tool whose retrieve_code_context is the agent's only
+            function tool; the API passes one scoped to a single repo.
 
     Returns:
-        The configured LlmAgent, with LangSmith tracing callbacks attached.
+        The LlmAgent, with budget and LangSmith tracing callbacks attached.
 
     Example:
-        >>> tool = CodebaseRetrievalTool(RetrievalService(repo_id="c3460b930023"))
+        >>> service = RetrievalService(repo_id="c3460b930023")
+        >>> tool = CodebaseRetrievalTool(service)
         >>> runner = InMemoryRunner(agent=build_agent(tool))
     """
     function_tool = FunctionTool(func=retrieval_tool.retrieve_code_context)
@@ -97,25 +89,21 @@ def build_agent(retrieval_tool: CodebaseRetrievalTool) -> LlmAgent:
 
 @functools.cache
 def get_root_agent() -> LlmAgent:
-    """Return the default root agent, building it on first call.
-
-    Returns:
-        The process-wide agent over the default (all-repos) retrieval tool.
-    """
+    """Return the all-repos default agent (adk web, evaluation), built once."""
     return build_agent(get_codebase_retrieval_tool())
 
 
 def __getattr__(name: str) -> LlmAgent:
-    """Lazily resolve `root_agent` (PEP 562 module __getattr__).
+    """Build `root_agent` lazily on first access (PEP 562).
 
     Args:
         name: Attribute being looked up on the module.
 
     Returns:
-        The default root agent, built on first access.
+        The default agent, for name == "root_agent".
 
     Raises:
-        AttributeError: For any other attribute name.
+        AttributeError: For any other name.
     """
     if name == "root_agent":
         return get_root_agent()

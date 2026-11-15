@@ -14,27 +14,19 @@ logger = logging.getLogger(__name__)
 
 @setup_logging.connect
 def configure_worker_logging(**_kwargs: object) -> None:
-    """Use the app's log format in the worker instead of Celery's.
+    """Use the app's log format in the worker (Celery setup_logging signal).
 
-    Connecting this signal stops Celery hijacking the root logger, which
-    would drop extra={...} fields and ignore LOG_LEVEL (--loglevel is then
-    unused). Only the worker fires it; the API imports this module freely.
+    Connecting this signal also stops Celery hijacking the root logger.
     """
     configure_logging(service="worker")
 
 
-# Celery refuses a rediss:// URL whose SSL options don't say how to verify
-# the server certificate.
+# Celery refuses rediss:// unless the SSL options say how to verify.
 _VERIFIED_TLS = {"ssl_cert_reqs": ssl.CERT_REQUIRED}
 
 
 def create_celery_app() -> Celery:
-    """Create and configure a Celery application instance.
-
-    Broker and result backend come from CELERY_BROKER_URL /
-    CELERY_RESULT_BACKEND (falling back to REDIS_URL), and task time limits
-    are derived from INGESTION_TIMEOUT_SECONDS. rediss:// URLs connect over
-    TLS with certificate verification.
+    """Create the Celery app on Redis, with TLS verification for rediss://.
 
     Returns:
         The configured Celery app, with worker.tasks registered.
@@ -64,9 +56,7 @@ def create_celery_app() -> Celery:
             if settings.celery_result_backend.startswith("rediss://")
             else None
         ),
-        # An unacked task is redelivered after this timeout. Redis's default
-        # (1 h) can be shorter than an ingestion, which would hand a running
-        # task to a second worker; this one outlasts any run.
+        # Outlasts any run, so a running task is never redelivered.
         broker_transport_options={
             "visibility_timeout": settings.celery_visibility_timeout_seconds
         },
@@ -75,21 +65,15 @@ def create_celery_app() -> Celery:
         accept_content=["json"],
         timezone="UTC",
         enable_utc=True,
-        # Ack after the task finishes, so a crash mid-ingestion redelivers
-        # the job instead of losing it. Prefetch 1 stops one worker hoarding
-        # long tasks while another sits idle.
+        # Ack late so a crash redelivers; prefetch 1 so no worker hoards.
         task_acks_late=True,
         worker_prefetch_multiplier=1,
         task_track_started=True,
         broker_connection_retry_on_startup=True,
-        # Enforced only by a prefork pool. Under --pool=solo (docker-compose,
-        # Windows) they are ignored, and ingest_repo's own timeout checks
-        # after every batch stop the run instead.
+        # Prefork only; under --pool=solo the pipeline's own checks apply.
         task_soft_time_limit=settings.ingestion_timeout_seconds,
         task_time_limit=settings.ingestion_hard_time_limit_seconds,
-        # Keep the API and every worker within a managed Redis's client
-        # limit (Redis Cloud free plan: 30). Publishers wait for a free
-        # pooled connection instead of opening another.
+        # Stay within Redis Cloud's 30-client limit.
         broker_pool_limit=settings.celery_broker_pool_limit,
         redis_max_connections=settings.celery_redis_max_connections,
         # Redis drops idle connections; detect that before the next write.

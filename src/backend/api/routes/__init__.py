@@ -1,7 +1,4 @@
 """Versioned API route modules.
 
-Routers are not re-exported: they import api.core.dependencies, which builds
-the API's clients at import.
+Nothing is re-exported: import each module by its full path.
 """
-
-__all__: list[str] = []

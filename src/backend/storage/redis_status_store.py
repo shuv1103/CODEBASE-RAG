@@ -5,28 +5,27 @@ from typing import Unpack
 
 import redis
 
+from storage.status_store import RepoStatus, StatusFields, StatusStore
 from utils.config import settings
-
-from .status_store import RepoStatus, StatusFields, StatusStore
 
 _KEY_PREFIX = "codebase-rag:repo-status:"
 _POOL_WAIT_SECONDS = 10
 # Redis drops idle connections; re-check one idle this long before reuse.
 _HEALTH_CHECK_SECONDS = 30
+# Writers per record are few; this many lost races means something is wrong.
+_MAX_CAS_ATTEMPTS = 10
 
 
 class RedisStatusStore(StatusStore):
-    """StatusStore in Redis, shared by the API and Celery worker processes.
+    """StatusStore in Redis, shared by the API and the Celery workers.
 
-    Workers report progress from other processes, so the record must live
-    outside any one process. Connections come from a blocking pool capped at
-    REDIS_STATUS_MAX_CONNECTIONS per process, keeping the whole stack within
-    a managed Redis's client limit (Redis Cloud free plan: 30).
+    Records are JSON at "codebase-rag:repo-status:<repo_id>"; connections come
+    from a pool capped at REDIS_STATUS_MAX_CONNECTIONS.
 
     Args:
-        redis_url: Redis connection URL. Defaults to REDIS_URL.
+        redis_url: Defaults to REDIS_URL.
         ttl_seconds: Record lifetime. Defaults to REPO_STATUS_TTL_SECONDS;
-            0 or unset means records never expire.
+            0 means records never expire.
     """
 
     def __init__(
@@ -49,7 +48,7 @@ class RedisStatusStore(StatusStore):
 
     @staticmethod
     def key(repo_id: str) -> str:
-        """Return the Redis key for a repo's status record.
+        """Return the Redis key of a repo's status record.
 
         Args:
             repo_id: Repo the key belongs to.
@@ -60,13 +59,13 @@ class RedisStatusStore(StatusStore):
         return f"{_KEY_PREFIX}{repo_id}"
 
     def get(self, repo_id: str) -> RepoStatus | None:
-        """Read and deserialize a repo's status record.
+        """Read a repo's status record.
 
         Args:
             repo_id: Repo to look up.
 
         Returns:
-            The status record, or None if the key is absent.
+            The record, or None if the key is absent.
         """
         raw = self._redis.get(self.key(repo_id))
         return RepoStatus.model_validate_json(raw) if raw else None
@@ -74,15 +73,15 @@ class RedisStatusStore(StatusStore):
     def create_if_absent(
         self, repo_id: str, url: str
     ) -> tuple[RepoStatus, bool]:
-        """Atomically create a pending record using Redis SET NX.
+        """Atomically create a pending record with SET NX.
 
         Args:
             repo_id: Repo to create a record for.
             url: Normalized repository URL.
 
         Returns:
-            (record, created); created=False means another caller's record
-            already existed and is returned unchanged.
+            (record, created); created is False when another caller's record
+            already existed.
         """
         record = RepoStatus.new_pending(repo_id, url)
 
@@ -102,28 +101,11 @@ class RedisStatusStore(StatusStore):
             return self.create_if_absent(repo_id, url)
         return existing, False
 
-    def update(self, repo_id: str, **fields: Unpack[StatusFields]) -> None:
-        """Merge fields into a repo's record and rewrite it. No-op if unknown.
-
-        Args:
-            repo_id: Repo whose record should be updated.
-            **fields: RepoStatus fields to overwrite.
-        """
-        existing = self.get(repo_id)
-        if existing is None:
-            return
-        updated = existing.with_updates(**fields)
-        self._redis.set(
-            self.key(repo_id), updated.model_dump_json(), ex=self._ttl_seconds
-        )
-
     def iter_records(self) -> Iterator[RepoStatus]:
-        """Yield every stored status record.
-
-        Uses SCAN, so a large keyspace never blocks Redis.
+        """Yield every stored status record, via non-blocking SCAN.
 
         Yields:
-            Each repo's status record.
+            Each repo's RepoStatus.
         """
         for key in self._redis.scan_iter(match=f"{_KEY_PREFIX}*"):
             if record := self.get(key.removeprefix(_KEY_PREFIX)):
@@ -135,24 +117,25 @@ class RedisStatusStore(StatusStore):
         expected_attempt_id: str | None,
         **fields: Unpack[StatusFields],
     ) -> bool:
-        """Merge fields into a repo's record only if its attempt still matches.
+        """Merge fields while the attempt still matches, using WATCH/MULTI.
 
-        Uses WATCH/MULTI, so a concurrent write between the read and the
-        write makes this retry against the new record instead of
-        overwriting it.
+        A concurrent write in between makes it retry on the new record,
+        up to _MAX_CAS_ATTEMPTS times.
 
         Args:
-            repo_id: Repo whose record should be updated.
+            repo_id: Repo whose record to update.
             expected_attempt_id: Attempt the caller belongs to.
             **fields: RepoStatus fields to overwrite.
 
         Returns:
-            True if the record was updated; False if it is unknown or now
-            belongs to another attempt.
+            True if updated; False if unknown or another attempt's.
+
+        Raises:
+            redis.WatchError: If every attempt lost a race.
         """
         key = self.key(repo_id)
         with self._redis.pipeline() as pipe:
-            while True:
+            for _ in range(_MAX_CAS_ATTEMPTS):
                 try:
                     pipe.watch(key)
                     raw = pipe.get(key)
@@ -173,3 +156,6 @@ class RedisStatusStore(StatusStore):
                     return True
                 except redis.WatchError:
                     continue
+        raise redis.WatchError(
+            f"{key} kept changing; gave up after {_MAX_CAS_ATTEMPTS} attempts"
+        )

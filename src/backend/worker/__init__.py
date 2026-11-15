@@ -1,3 +1,4 @@
-"""Celery worker: application config and the ingestion task."""
+"""Celery worker: application config and the ingestion task.
 
-__all__: list[str] = []
+Nothing is re-exported: import each module by its full path.
+"""

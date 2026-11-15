@@ -1,86 +1,55 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { memo, useEffect, useRef, useState, type FormEvent } from "react";
 import { getErrorMessage, sendChatMessage } from "../api";
+import type { CacheHit } from "../types";
 
 interface ChatPanelProps {
   repoId: string;
-  url: string;
-  onReset: () => void;
+  name: string;
 }
 
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
-  cacheHit?: "exact" | "semantic" | null;
+  cacheHit?: CacheHit;
 }
 
-function ExpandIcon({ expanded }: { expanded: boolean }) {
+// Memoized so typing in the composer does not re-render every message.
+const MessageList = memo(function MessageList({
+  messages,
+  sending,
+  name,
+}: {
+  messages: ChatMessage[];
+  sending: boolean;
+  name: string;
+}) {
   return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      {expanded ? (
-        <>
-          <path d="M6 1.5v4.5H1.5" />
-          <path d="M0.75 0.75 6 6" />
-          <path d="M8 12.5V8h4.5" />
-          <path d="M13.25 13.25 8 8" />
-        </>
-      ) : (
-        <>
-          <path d="M8.5 1h4.5v4.5" />
-          <path d="M13 1 8 6" />
-          <path d="M5.5 13H1V8.5" />
-          <path d="M1 13l5-5" />
-        </>
-      )}
-    </svg>
+    <>
+      {messages.length === 0 && <p className="chat-empty">Ask anything about {name}.</p>}
+      {messages.map((m, i) => (
+        <div key={i} className={`msg msg-${m.role}`}>
+          {m.cacheHit && <span className="tag">{m.cacheHit === "exact" ? "Exact cache" : "Semantic cache"}</span>}
+          {m.content}
+        </div>
+      ))}
+      {sending && <div className="msg msg-assistant msg-pending">Searching the code…</div>}
+    </>
   );
-}
+});
 
-export default function ChatPanel({ repoId, url, onReset }: ChatPanelProps) {
+export default function ChatPanel({ repoId, name }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  function scrollToBottom() {
-    requestAnimationFrame(() => {
-      const el = listRef.current;
-      el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    });
-  }
-
-  // Lock the page behind the panel and let Escape collapse it.
+  // Keep the newest message in view after every send and reply.
   useEffect(() => {
-    if (!expanded) return;
-
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setExpanded(false);
-    }
-    window.addEventListener("keydown", handleKey);
-
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", handleKey);
-    };
-  }, [expanded]);
-
-  // Keep the newest message in view when the panel changes size.
-  useEffect(scrollToBottom, [expanded]);
+    const el = listRef.current;
+    el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [messages, sending]);
 
   async function handleSend(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -91,7 +60,6 @@ export default function ChatPanel({ repoId, url, onReset }: ChatPanelProps) {
     setInput("");
     setSending(true);
     setError(null);
-    scrollToBottom();
 
     try {
       const res = await sendChatMessage(repoId, text, sessionId);
@@ -104,68 +72,39 @@ export default function ChatPanel({ repoId, url, onReset }: ChatPanelProps) {
       setError(getErrorMessage(err));
     } finally {
       setSending(false);
-      scrollToBottom();
     }
   }
 
   return (
-    <>
-      {expanded && (
-        <div className="chat-backdrop" onClick={() => setExpanded(false)} aria-hidden="true" />
-      )}
-      <div className={`card chat-card${expanded ? " chat-card-expanded" : ""}`}>
-        <div className="card-head">
-          <span className="step-label">03 / Chat</span>
-          <div className="card-head-actions">
-            <button type="button" className="link-btn" onClick={onReset}>
-              New repository
-            </button>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={() => setExpanded((v) => !v)}
-              aria-expanded={expanded}
-              aria-label={expanded ? "Collapse chat" : "Expand chat to full screen"}
-              title={expanded ? "Collapse (Esc)" : "Expand to full screen"}
-            >
-              <ExpandIcon expanded={expanded} />
-            </button>
-          </div>
+    <main className="chat">
+      <div className="chat-log" ref={listRef} role="log" aria-live="polite">
+        <div className="chat-column">
+          <MessageList messages={messages} sending={sending} name={name} />
         </div>
-        <p className="field-label repo-url" title={url}>
-          {url}
-        </p>
+      </div>
 
-        <div className="chat-list" ref={listRef}>
-          {messages.length === 0 && (
-            <p className="chat-empty">Ask a question about this codebase to get started.</p>
-          )}
-          {messages.map((m, i) => (
-            <div key={i} className={`bubble bubble-${m.role}`}>
-              {m.cacheHit && <span className="bubble-cached-badge">{m.cacheHit} cache answer</span>}
-              {m.content}
-            </div>
-          ))}
-          {sending && (
-            <div className="bubble bubble-assistant bubble-pending">Searching the codebase…</div>
-          )}
-        </div>
-
-        {error && <p className="error-text">{error}</p>}
-
-        <form className="chat-input-row" onSubmit={handleSend}>
+      <div className="chat-dock">
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+        <form className="composer" onSubmit={handleSend}>
           <input
+            className="composer-input"
             type="text"
-            placeholder="What does this repo do?"
+            aria-label="Your question"
+            placeholder="Ask a question about the code"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             disabled={sending}
+            autoFocus
           />
-          <button type="submit" className="btn-primary btn-compact" disabled={sending || !input.trim()}>
+          <button type="submit" className="btn btn-primary" disabled={sending || !input.trim()}>
             Send
           </button>
         </form>
       </div>
-    </>
+    </main>
   );
 }

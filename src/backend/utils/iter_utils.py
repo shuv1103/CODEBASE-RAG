@@ -11,7 +11,7 @@ def batchify(items: list[T], batch_size: int) -> Iterator[list[T]]:
 
     Args:
         items: Items to split.
-        batch_size: Maximum items per batch.
+        batch_size: Maximum items per batch; must be positive.
 
     Yields:
         Lists of up to batch_size items, in order.
