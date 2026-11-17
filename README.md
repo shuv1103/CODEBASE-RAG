@@ -380,6 +380,7 @@ The current implementation uses dense vector search only; BM25 keyword search, h
 - Agent system instruction enforces **retrieve-before-generate** behavior — the model cannot answer without first invoking the retrieval tool.
 
 **Core files:** `codebase_rag_agent/agent.py`, `codebase_rag_agent/tools.py`, `codebase_rag_agent/tracing.py`, `api/core/agent_runtime.py`
+
 ---
 
 ### 6 — Evaluation Layer (RAGAS)
