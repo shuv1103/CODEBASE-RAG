@@ -45,8 +45,8 @@ Ask *"Where is JWT authentication implemented?"* and get back the exact files, c
 ## System Architecture Diagram
 
 
+<img width="1117" height="897" alt="image" src="https://github.com/user-attachments/assets/e4b4798f-ab0b-4432-af6e-caecbd0975ef" />
 
-<img width="1343" height="881" alt="image" src="https://github.com/user-attachments/assets/1a08ab80-5c50-4034-bd04-5926bd8590fd" />
 
 ---
 
@@ -82,49 +82,85 @@ This is **retrieval-grounded generation** working as designed: no hallucination,
 
 ## Repository Structure
 
+> Updated 2026-11-16 to match the current codebase. `src/backend/` is the Python import root (imports are flat, e.g. `from utils.config import settings`).
+
 ```text
 CODEBASE-RAG/
-├── Dockerfile
-├── docker-compose.yml
-├── req.txt
-├── README.md
-├── docs/
-│   └── image.png                        # ADK UI live test screenshot
+├── Dockerfile                           # Backend image (API + Celery worker), runs as non-root
+├── docker-compose.yml                   # api :8000, celery_worker, frontend :5173
+├── requirements.txt                     # Pinned runtime dependencies
+├── requirements-dev.txt                 # pytest, ruff
+├── ruff.toml / pytest.ini
+├── scripts/                             # Local CLIs (not used by the API)
+│   ├── chunk_main.py                    # Chunk a local repo to JSONL
+│   ├── embeddings_main.py               # Embed JSONL chunks into Qdrant
+│   ├── reingest_ready_repos.py          # Re-ingest every ready repo (dry run unless --apply)
+│   └── locustfile.py                    # Load test
+├── tests/                               # pytest suite (offline, no live services)
 └── src/
-    ├── ingestion/
-    │   ├── repo_loader.py               # Directory traversal, FileDocument producer
-    │   └── language_detector.py         # Extension → language mapping
-    ├── chunking/
-    │   ├── chunk_models.py              # Pydantic models: CodeChunk, ChunkManifest
-    │   ├── chunker.py                   # ASTCodeChunker — astchunk integration
-    │   ├── chunk_persist.py             # JSONL + manifest persistence
-    │   └── chunk_main.py               # Pipeline entrypoint
-    ├── embeddings/
-    │   ├── embeddings_models.py         # Pydantic models: EmbeddingRecord, BatchStats
-    │   ├── embeddings_formatter.py      # Builds embedding-ready text from chunk + metadata
-    │   ├── embeddings_client.py         # Google embedding API wrapper
-    │   ├── qdrant_store.py             # Qdrant collection + tenant index, batch upsert
-    │   └── embeddings_main.py          # Pipeline entrypoint
-    ├── retrieval/
-    │   ├── retrieval_models.py          # Pydantic models: RetrievalResult, RetrievalResponse
-    │   ├── query_embedder.py            # Converts query text to embedding vector
-    │   ├── qdrant_retriever.py          # repo_id-filtered similarity search against Qdrant
-    │   └── retrieval_service.py         # Orchestrates query → retrieval → format
-    ├── codebase_rag_agent/
-    │   ├── tools.py                     # retrieve_code_context ADK tool definition
-    │   └── agent.py                     # LlmAgent setup, instruction, tool registration
-    ├── evaluation/
-    │   ├── loader.py                    # Loads and validates evaluation dataset
-    │   ├── ragas_eval.py                # RAGAS metric computation
-    │   ├── run_eval.py                  # Evaluation entrypoint
-    │   └── dataset.json                 # Ground-truth Q&A pairs
-    ├── utils/
-    │   ├── config.py                    # Environment variable loading (Pydantic Settings)
-    │   ├── chunk_config.py              # Chunking tunable parameters
-    │   └── file_utility.py             # Shared path and I/O helpers
-    └── data/chunks/
-        ├── code_chunks.jsonl            # Chunking output artifact
-        └── chunk_manifest.json          # Chunk run metadata and stats
+    ├── backend/
+    │   ├── api/
+    │   │   ├── main.py                  # FastAPI app, CORS, middleware, logging
+    │   │   ├── routes/v1/repo_routes.py # /health, /repos, /repos/{id}, /repos/{id}/chat
+    │   │   ├── schemas/repo_schemas.py  # Request/response models, input length caps
+    │   │   └── core/
+    │   │       ├── dependencies.py      # RagWorkflowFacade (dedup, enqueue, cache-then-agent chat)
+    │   │       ├── agent_runtime.py     # AgentRegistry (per-repo runners), LLMConcurrencyLimiter
+    │   │       ├── middleware.py        # Request id, body size limit, generic 500
+    │   │       ├── exceptions.py        # Domain errors -> HTTP status handlers
+    │   │       └── rate_limit.py        # slowapi per-IP + global limits
+    │   ├── worker/
+    │   │   ├── celery_app.py            # Celery config (acks_late, prefetch 1)
+    │   │   └── tasks.py                 # ingest_repo_task, task_failure handler
+    │   ├── ingestion/
+    │   │   ├── git_cloner.py            # GitHub size check, shallow clone, file/byte caps
+    │   │   ├── repo_loader.py           # Filtered FileDocuments (skips symlinks)
+    │   │   └── ingest_pipeline.py       # clone -> chunk -> embed -> upsert, timeouts, cleanup
+    │   ├── chunking/
+    │   │   ├── chunker.py               # ASTCodeChunker: chonkie CodeChunker in a subprocess pool
+    │   │   └── chunk_config.py          # Chunk size 2,300, character tokenizer, batch 20
+    │   ├── embeddings/
+    │   │   ├── embeddings_formatter.py  # Embedding input text: location headers + code
+    │   │   └── embeddings_client.py     # OpenAI embeddings with exponential backoff
+    │   ├── storage/
+    │   │   ├── qdrant_store.py          # Collection, HNSW config, tenant index, upsert, delete_stale
+    │   │   ├── status_store.py          # RepoStatus + StatusStore ABC (in-memory)
+    │   │   └── redis_status_store.py    # Production status store (atomic SET NX, CAS on attempt_id)
+    │   ├── retrieval/
+    │   │   ├── qdrant_retriever.py      # repo_id-filtered search (hnsw_ef)
+    │   │   └── retrieval_service.py     # Embed query -> search -> format context
+    │   ├── caching/
+    │   │   ├── semantic_cache_service.py    # Lookup/store policy, follow-up keys, normalize_query
+    │   │   ├── semantic_cache_repository.py # LangCacheRepository
+    │   │   └── pii_detector.py              # PII/credential gate
+    │   ├── codebase_rag_agent/
+    │   │   ├── agent.py                 # build_agent: ADK LlmAgent + instructions + callbacks
+    │   │   ├── tools.py                 # retrieve_code_context tool
+    │   │   └── tracing.py               # LangSmith tracing (redacted)
+    │   ├── models/                      # Pydantic models shared across layers
+    │   │   ├── ingestion_models.py      # FileDocument, IngestionStats, IngestionResult
+    │   │   ├── chunk_models.py          # ChunkMetadata, CodeChunk, ChunkingStats, ChunkingResult
+    │   │   ├── embeddings_models.py     # EmbeddedChunk
+    │   │   └── retrieval_models.py      # RetrievedChunk, RetrievalResponse
+    │   ├── evaluation/
+    │   │   ├── run_eval.py              # Entry point: python -m evaluation.run_eval
+    │   │   ├── ragas_eval.py            # RAGAS metrics on live agent answers
+    │   │   ├── metrics.py               # Recall@K, latency P50/P95/P99, cost per query
+    │   │   ├── loader.py                # Dataset loading + validation
+    │   │   └── dataset.json             # 15 labeled Q&A records
+    │   └── utils/
+    │       ├── config.py                # Settings (pydantic-settings), language table, filters
+    │       ├── file_utility.py          # is_supported_file, detect_language, safe reads
+    │       ├── rate_limiter.py          # OpenAIRequestBudget, ExponentialBackoff
+    │       ├── model_config.py          # LiteLLM model factory
+    │       ├── logging_config.py        # Structured logs with request_id
+    │       ├── repo_id.py               # normalize_github_url, repo_id = sha1(url)[:12]
+    │       ├── iter_utils.py / time_utils.py
+    └── frontend/                        # React + Vite + TypeScript
+        └── src/
+            ├── api.ts                   # The only API client
+            ├── App.tsx, types.ts
+            └── components/              # IngestForm, StatusPanel, ChatPanel
 ```
 
 ---
@@ -262,14 +298,15 @@ Runs the RAGAS evaluation suite against `dataset.json` and prints metric scores.
 
 ## Deep Dive: Each Layer
 
-### 1 — Ingestion
+### 1 — Repository Ingestion
 
-- Walks the repository tree and filters by supported file extensions.
-- Skips build artifacts, dependency directories (`node_modules`, `__pycache__`, `.git`, etc.).
-- Produces typed `FileDocument` objects with language, path, and raw content.
-- Detects language from extension: Python, JS/TS, Java, C#, C/C++, Rust, Go, Dart, and more.
+- **Validate and identify**: Accepts public GitHub repository URLs and creates a stable repo_id from the normalized URL.
+- **Cloning**: The latest version of github repo is cloned.
+- **Controls Processing Size**: Checks the Github repository size before cloning(max 1 GB) then limits processing to 5000 files, 2 MB/file, 20,000 chunks. These limits controlled **processing time** and **embedding costs**.
+- Filtering: Filters source files, skips dependency files like .env, node_modules, lockfiles, binaries, and other executable files.
+- Status Tracking: Tracks cloning, chunking and embedding progress.
 
-**Core files:** `src/ingestion/repo_loader.py`, `src/ingestion/language_detector.py`, `src/utils/config.py`
+**Core files:** `ingestion/git_cloner.py`, `ingestion/repo_loader.py`, `ingestion/ingest_pipeline.py`
 
 ---
 
@@ -310,35 +347,39 @@ Naive token-window splitting destroys code semantics — a function split at a r
 
 ### 3 — Embedding and Vectorization
 
-- Formats each chunk into an embedding-ready string combining code content and metadata (language, file path, symbol name).
-- Calls Google's `text-embedding-004` model in configurable batches.
-- Upserts vectors and full metadata payloads into a persistent Qdrant collection (cosine distance, HNSW index), each point tagged with its `repo_id`.
-- Tracks batch-level operational counters for observability.
+Each chunk is converted into an embedding, a vector that lets the system find code related to a question by meaning, not only by exact words.
 
-**Core files:** `src/embeddings/embeddings_formatter.py`, `src/embeddings/embeddings_client.py`, `src/embeddings/qdrant_store.py`, `src/embeddings/embeddings_main.py`
+- **Add source context:** The embedding input is `File:`, `Path:`, `Language:` and `Lines:` headers followed by the code.
+- **Generate embeddings:** OpenAI `text-embedding-3-large` (3,072 dimensions), in batches of 20. Rate-limit (429) errors are retried with exponential backoff, up to 5 retries, and a shared OpenAI RPM budget in Redis can be enabled with `OPENAI_RPM_LIMIT`.
+- **Store in Qdrant:** Saves each vector with its code and metadata in one collection configured for cosine similarity and an HNSW index (`m=16`, `ef_construct=200`).
+- **Separate repositories:** All repositories share one collection; `repo_id` has a tenant payload index and every search filters on it.
+- **Avoid duplicate points:** The point ID is a deterministic UUIDv5 of `repo_id:chunk_id`. Each run tags its points with an `ingest_run_id`; the repository's points from older runs are deleted only **after** the new run's last batch is stored, so a failed re-ingest leaves the previous index intact.
+
+**Core files:** `embeddings/embeddings_formatter.py`, `embeddings/embeddings_client.py`, `storage/qdrant_store.py`, `models/embeddings_models.py`
 
 ---
 
 ### 4 — Retrieval
 
-- Embeds the user's natural language query using the same Google embedding model.
-- Executes cosine similarity search against Qdrant, filtered to the repo's `repo_id`.
-- Normalizes raw Qdrant results into typed `RetrievalResult` / `RetrievalResponse` objects.
-- Formats retrieved chunks into structured, LLM-ready context blocks with file path and line attribution.
+1. Converts the question into an embedding with the same model used for the code.
+2. Searches Qdrant by cosine similarity for the top `TOP_K` chunks (`hnsw_ef=128`).
+3. Filters by `repo_id`, so only the selected repository is searched. A missing `repo_id` raises an error instead of searching every repo.
+4. Returns ranked chunks with file paths, line ranges and similarity scores.
+5. Formats them into `[Chunk N]` context blocks for the agent.
 
-**Core files:** `src/retrieval/query_embedder.py`, `src/retrieval/qdrant_retriever.py`, `src/retrieval/retrieval_service.py`, `src/retrieval/retrieval_models.py`
+The current implementation uses dense vector search only; BM25 keyword search, hybrid search and a reranking model are not implemented.
+
+**Core files:** `retrieval/retrieval_service.py`, `retrieval/qdrant_retriever.py`, `models/retrieval_models.py`
 
 ---
 
 ### 5 — Agent Layer (Google ADK)
 
 - Defines a single tool `retrieve_code_context` that wraps the `RetrievalService`.
-- Registers the tool in a Google ADK `LlmAgent` backed by Gemini 2.0 Flash.
+- Registers the tool in a Google ADK `LlmAgent` backed by gpt-4.1.
 - Agent system instruction enforces **retrieve-before-generate** behavior — the model cannot answer without first invoking the retrieval tool.
-- The ADK web UI provides Events and Traces panels for full tool-call transparency.
 
-**Core files:** `src/codebase_rag_agent/tools.py`, `src/codebase_rag_agent/agent.py`
-
+**Core files:** `codebase_rag_agent/agent.py`, `codebase_rag_agent/tools.py`, `codebase_rag_agent/tracing.py`, `api/core/agent_runtime.py`
 ---
 
 ### 6 — Evaluation Layer (RAGAS)
