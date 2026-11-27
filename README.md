@@ -312,6 +312,7 @@ Runs the RAGAS evaluation suite against `dataset.json` and prints metric scores.
 
 ### 2 — AST Chunking
 
+#### AST Internals
 <img width="869" height="745" alt="image" src="https://github.com/user-attachments/assets/bda84470-e5f9-4a94-8a57-70a44f31bb51" />
 
 Naive token-window splitting destroys code semantics — a function split at a random line loses its actual context. This layer uses `astchunk` to cut along syntax tree boundaries.
@@ -340,9 +341,6 @@ Naive token-window splitting destroys code semantics — a function split at a r
 
 **Core files:** `src/chunking/chunker.py`, `src/chunking/chunk_models.py`, `src/chunking/chunk_persist.py`, `src/utils/chunk_config.py`
 
-
-
-
 ---
 
 ### 3 — Embedding and Vectorization
@@ -359,7 +357,20 @@ Each chunk is converted into an embedding, a vector that lets the system find co
 
 ---
 
-### 4 — Retrieval
+### 5 — CACHING
+
+1. Redis LangCache stores answers of repeated questions and reduce extra LLM calls.
+2. Exact Caching - Checks for a cache answer of an existing exact question match(normalized).
+3. Semantic Caching - Checks for a cache answer for semantically similar question match using threshold value = 0.85
+4. Cache Expiration - Cache entries expires after 1 hour. Re-ingestion clears the repository's cached answers.
+5. Cache Boundary - Associates each cache to a specific `repo_id` , preventing answers fetched from different repository.
+6. Privacy & Fallback - PII(sensitive information, credentials) are not cached. Even a failed PII check bypasses cache. Cache
+   errors are treated as misses, so chat can continue through an agent.
+
+<img width="1026" height="598" alt="image" src="https://github.com/user-attachments/assets/64305936-2010-4c3c-aefc-6529542f1896" />
+
+
+### 5 — Retrieval
 
 1. Converts the question into an embedding with the same model used for the code.
 2. Searches Qdrant by cosine similarity for the top `TOP_K` chunks (`hnsw_ef=128`).
@@ -373,7 +384,7 @@ The current implementation uses dense vector search only; BM25 keyword search, h
 
 ---
 
-### 5 — Agent Layer (Google ADK)
+### 6 — Agent Layer (Google ADK)
 
 - Defines a single tool `retrieve_code_context` that wraps the `RetrievalService`.
 - Registers the tool in a Google ADK `LlmAgent` backed by gpt-4.1.
@@ -383,7 +394,7 @@ The current implementation uses dense vector search only; BM25 keyword search, h
 
 ---
 
-### 6 — Evaluation Layer (RAGAS)
+### 7 — Evaluation Layer (RAGAS)
 
 Evaluation is built in from the start rather than bolted on later.
 
